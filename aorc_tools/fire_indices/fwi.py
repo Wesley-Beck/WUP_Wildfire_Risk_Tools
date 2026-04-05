@@ -66,55 +66,64 @@ def mc_to_dc(mc):
 # Hourly FFMC (from cffdrs-ng hourly_fine_fuel_moisture)
 # =============================================================================
 
-def hourly_ffmc(lastmc, temp, rh, ws, rain, time_increment=1.0):
-    """Hourly Fine Fuel Moisture Code calculation.
+def hourly_ffmc_vectorized(lastmc, temp, rh, ws, rain, time_increment=1.0):
+    """Vectorized hourly Fine Fuel Moisture Code calculation.
 
-    Ported directly from cffdrs-ng NG_FWI.py hourly_fine_fuel_moisture().
-    Uses modified drying/wetting rates with time_increment scaling.
+    Fully vectorized NumPy implementation of cffdrs-ng hourly_fine_fuel_moisture().
+    Processes all points simultaneously instead of one-by-one Python loop.
 
     Args:
-        lastmc: Previous hour's moisture content (%).
-        temp: Temperature (°C).
-        rh: Relative humidity (%).
-        ws: Wind speed (km/h).
-        rain: Precipitation (mm) for this hour.
+        lastmc: Previous hour's moisture content (%) — array of n_points.
+        temp: Temperature (°C) — array.
+        rh: Relative humidity (%) — array.
+        ws: Wind speed (km/h) — array.
+        rain: Precipitation (mm) — array.
         time_increment: Time step in hours (default 1.0).
 
     Returns:
-        Updated moisture content (%).
+        Updated moisture content (%) — array of n_points.
     """
+    lastmc = np.asarray(lastmc, dtype=np.float64)
+    temp = np.asarray(temp, dtype=np.float64)
+    rh = np.asarray(rh, dtype=np.float64)
+    ws = np.asarray(ws, dtype=np.float64)
+    rain = np.asarray(rain, dtype=np.float64)
+
     rf = 42.5
     drf = 0.0579
-    mo = lastmc
+    mo = lastmc.copy()
 
-    # Rain effect
-    if rain != 0.0:
-        mo += rf * rain * exp(-100.0 / (251.0 - lastmc)) * (1.0 - exp(-6.93 / rain))
-        if lastmc > 150.0:
-            mo += 0.0015 * (lastmc - 150.0) ** 2 * sqrt(rain)
-        if mo > 250.0:
-            mo = 250.0
+    # Rain effect (vectorized)
+    has_rain = rain != 0.0
+    if np.any(has_rain):
+        rain_effect = rf * rain * np.exp(-100.0 / (251.0 - lastmc)) * (1.0 - np.exp(-6.93 / np.maximum(rain, 1e-10)))
+        mo = np.where(has_rain, mo + rain_effect, mo)
+        # Extra wetting for very wet fuels
+        high_mc = has_rain & (lastmc > 150.0)
+        if np.any(high_mc):
+            extra = 0.0015 * (lastmc - 150.0) ** 2 * np.sqrt(np.maximum(rain, 0.0))
+            mo = np.where(high_mc, mo + extra, mo)
+        mo = np.minimum(mo, 250.0)
 
     # Equilibrium moisture contents
-    e1 = 0.18 * (21.1 - temp) * (1.0 - exp(-0.115 * rh))
-    ed = 0.942 * rh ** 0.679 + 11.0 * exp((rh - 100.0) / 10.0) + e1
-    ew = 0.618 * rh ** 0.753 + 10.0 * exp((rh - 100.0) / 10.0) + e1
+    e1 = 0.18 * (21.1 - temp) * (1.0 - np.exp(-0.115 * rh))
+    ed = 0.942 * np.power(rh, 0.679) + 11.0 * np.exp((rh - 100.0) / 10.0) + e1
+    ew = 0.618 * np.power(rh, 0.753) + 10.0 * np.exp((rh - 100.0) / 10.0) + e1
 
-    # Determine drying or wetting regime
-    if mo > ed:
-        # Drying
-        a1 = rh / 100.0
-        k0 = 0.424 * (1.0 - a1 ** 1.7) + 0.0694 * sqrt(ws) * (1.0 - a1 ** 8)
-        kd = 2.0 * drf * k0 * exp(0.0365 * temp)
-        m = ed + (mo - ed) * 10.0 ** (-kd * time_increment)
-    elif mo < ew:
-        # Wetting
-        a1 = (100.0 - rh) / 100.0
-        k0 = 0.424 * (1.0 - a1 ** 1.7) + 0.0694 * sqrt(ws) * (1.0 - a1 ** 8)
-        kw = 2.0 * drf * k0 * exp(0.0365 * temp)
-        m = ew - (ew - mo) * 10.0 ** (-kw * time_increment)
-    else:
-        m = mo
+    # Drying regime (mo > ed)
+    a1_dry = rh / 100.0
+    k0_dry = 0.424 * (1.0 - np.power(a1_dry, 1.7)) + 0.0694 * np.sqrt(ws) * (1.0 - np.power(a1_dry, 8))
+    kd = 2.0 * drf * k0_dry * np.exp(0.0365 * temp)
+    m_dry = ed + (mo - ed) * np.power(10.0, -kd * time_increment)
+
+    # Wetting regime (mo < ew)
+    a1_wet = (100.0 - rh) / 100.0
+    k0_wet = 0.424 * (1.0 - np.power(a1_wet, 1.7)) + 0.0694 * np.sqrt(ws) * (1.0 - np.power(a1_wet, 8))
+    kw = 2.0 * drf * k0_wet * np.exp(0.0365 * temp)
+    m_wet = ew - (ew - mo) * np.power(10.0, -kw * time_increment)
+
+    # Select regime per point
+    m = np.where(mo > ed, m_dry, np.where(mo < ew, m_wet, mo))
 
     return m
 
@@ -129,59 +138,64 @@ DMC_REGRESSION = 1.894e-6
 DMC_OFFSET_TEMP = 1.1
 
 
-def hourly_dmc(last_mcdmc, hr, temp, rh, precip, sunrise, sunset,
-               precip_cumulative_prev, time_increment=1.0):
-    """Hourly Duff Moisture Code calculation.
+def hourly_dmc_vectorized(last_mcdmc, hr, temp, rh, precip, sunrise, sunset,
+                          precip_cumulative_prev, time_increment=1.0):
+    """Vectorized hourly Duff Moisture Code calculation.
 
-    Ported from cffdrs-ng NG_FWI.py duff_moisture_code().
+    Fully vectorized NumPy implementation of cffdrs-ng duff_moisture_code().
     Drying only occurs during daylight hours.
 
     Args:
-        last_mcdmc: Previous moisture content for DMC (%).
-        hr: Current hour (0-23).
-        temp: Temperature (°C).
-        rh: Relative humidity (%).
-        precip: Precipitation this hour (mm).
-        sunrise: Sunrise hour (decimal, e.g. 6.5 = 6:30 AM).
-        sunset: Sunset hour (decimal).
-        precip_cumulative_prev: Cumulative precip since last intercept reset (mm).
+        last_mcdmc: Previous moisture content for DMC (%) — array.
+        hr: Current hour (0-23) — scalar.
+        temp: Temperature (°C) — array.
+        rh: Relative humidity (%) — array.
+        precip: Precipitation this hour (mm) — array.
+        sunrise: Sunrise hour (decimal) — scalar.
+        sunset: Sunset hour (decimal) — scalar.
+        precip_cumulative_prev: Cumulative precip (mm) — array.
         time_increment: Time step in hours (default 1.0).
 
     Returns:
-        Updated DMC moisture content (%).
+        Updated DMC moisture content (%) — array.
     """
-    # Wetting from rain
-    if precip_cumulative_prev + precip > DMC_INTERCEPT:
-        if precip_cumulative_prev <= DMC_INTERCEPT:
-            rw = (precip_cumulative_prev + precip) * 0.92 - 1.27
-        else:
-            rw = precip * 0.92
+    last_mcdmc = np.asarray(last_mcdmc, dtype=np.float64)
+    temp = np.asarray(temp, dtype=np.float64)
+    rh = np.asarray(rh, dtype=np.float64)
+    precip = np.asarray(precip, dtype=np.float64)
+    precip_cumulative_prev = np.asarray(precip_cumulative_prev, dtype=np.float64)
 
-        last_dmc_code = mc_to_dmc(last_mcdmc)
-        if last_dmc_code <= 33:
-            b = 100.0 / (0.5 + 0.3 * last_dmc_code)
-        elif last_dmc_code <= 65:
-            b = 14.0 - 1.3 * log(last_dmc_code)
-        else:
-            b = 6.2 * log(last_dmc_code) - 17.2
+    total_precip = precip_cumulative_prev + precip
+    exceeds = total_precip > DMC_INTERCEPT
+    just_exceeded = exceeds & (precip_cumulative_prev <= DMC_INTERCEPT)
 
-        mr = last_mcdmc + (1000.0 * rw) / (48.77 + b * rw)
-    else:
-        mr = last_mcdmc
+    rw = np.where(just_exceeded,
+                  total_precip * 0.92 - 1.27,
+                  precip * 0.92)
 
-    mr = min(mr, 300.0)
+    last_dmc_code = mc_to_dmc(np.clip(last_mcdmc, 20.01, 300.0))
+    b = np.where(last_dmc_code <= 33,
+                 100.0 / (0.5 + 0.3 * last_dmc_code),
+                 np.where(last_dmc_code <= 65,
+                          14.0 - 1.3 * np.log(np.maximum(last_dmc_code, 1e-10)),
+                          6.2 * np.log(np.maximum(last_dmc_code, 1e-10)) - 17.2))
+
+    mr = np.where(exceeds,
+                  last_mcdmc + (1000.0 * rw) / (48.77 + b * rw),
+                  last_mcdmc)
+    mr = np.minimum(mr, 300.0)
 
     # Drying (daylight hours only)
     is_daylight = (sunrise <= hr <= sunset) or (hr < 6 and sunrise <= hr + 24 <= sunset)
     if is_daylight:
-        t = max(temp, 0.0)
+        t = np.maximum(temp, 0.0)
         rk = DMC_REGRESSION * (t + DMC_OFFSET_TEMP) * (100.0 - rh)
         invtau = rk / 43.43
-        mcdmc = (mr - 20.0) * exp(-time_increment * invtau) + 20.0
+        mcdmc = (mr - 20.0) * np.exp(-time_increment * invtau) + 20.0
     else:
         mcdmc = mr
 
-    return min(mcdmc, 300.0)
+    return np.minimum(mcdmc, 300.0)
 
 
 # =============================================================================
@@ -193,51 +207,56 @@ DC_REGRESSION = 0.36
 DC_OFFSET_TEMP = 2.8
 
 
-def hourly_dc(last_mcdc, hr, temp, precip, sunrise, sunset,
-              precip_cumulative_prev, time_increment=1.0):
-    """Hourly Drought Code calculation.
+def hourly_dc_vectorized(last_mcdc, hr, temp, precip, sunrise, sunset,
+                         precip_cumulative_prev, time_increment=1.0):
+    """Vectorized hourly Drought Code calculation.
 
-    Ported from cffdrs-ng NG_FWI.py drought_code().
+    Fully vectorized NumPy implementation of cffdrs-ng drought_code().
     Drying only during daylight hours.
 
     Args:
-        last_mcdc: Previous DC moisture content (%).
-        hr: Current hour (0-23).
-        temp: Temperature (°C).
-        precip: Precipitation this hour (mm).
-        sunrise: Sunrise hour (decimal).
-        sunset: Sunset hour (decimal).
-        precip_cumulative_prev: Cumulative precip since last intercept reset.
+        last_mcdc: Previous DC moisture content (%) — array.
+        hr: Current hour (0-23) — scalar.
+        temp: Temperature (°C) — array.
+        precip: Precipitation this hour (mm) — array.
+        sunrise: Sunrise hour (decimal) — scalar.
+        sunset: Sunset hour (decimal) — scalar.
+        precip_cumulative_prev: Cumulative precip — array.
         time_increment: Time step in hours (default 1.0).
 
     Returns:
-        Updated DC moisture content (%).
+        Updated DC moisture content (%) — array.
     """
-    # Wetting
-    if precip_cumulative_prev + precip > DC_INTERCEPT:
-        if precip_cumulative_prev <= DC_INTERCEPT:
-            rw = (precip_cumulative_prev + precip) * 0.83 - 1.27
-        else:
-            rw = precip * 0.83
-        mr = last_mcdc + 3.937 * rw / 2.0
-    else:
-        mr = last_mcdc
+    last_mcdc = np.asarray(last_mcdc, dtype=np.float64)
+    temp = np.asarray(temp, dtype=np.float64)
+    precip = np.asarray(precip, dtype=np.float64)
+    precip_cumulative_prev = np.asarray(precip_cumulative_prev, dtype=np.float64)
 
-    mr = min(mr, 400.0)
+    total_precip = precip_cumulative_prev + precip
+    exceeds = total_precip > DC_INTERCEPT
+    just_exceeded = exceeds & (precip_cumulative_prev <= DC_INTERCEPT)
+
+    rw = np.where(just_exceeded,
+                  total_precip * 0.83 - 1.27,
+                  precip * 0.83)
+
+    mr = np.where(exceeds,
+                  last_mcdc + 3.937 * rw / 2.0,
+                  last_mcdc)
+    mr = np.minimum(mr, 400.0)
 
     # Drying (daylight hours only)
     is_daylight = (sunrise <= hr <= sunset) or (hr < 6 and sunrise <= hr + 24 <= sunset)
     if is_daylight:
-        if temp > 0:
-            pe = DC_REGRESSION * (temp + DC_OFFSET_TEMP) + 3.0 / 16.0
-        else:
-            pe = 0.0
+        pe = np.where(temp > 0,
+                      DC_REGRESSION * (temp + DC_OFFSET_TEMP) + 3.0 / 16.0,
+                      0.0)
         invtau = pe / 400.0
-        mcdc = mr * exp(-time_increment * invtau)
+        mcdc = mr * np.exp(-time_increment * invtau)
     else:
         mcdc = mr
 
-    return min(mcdc, 400.0)
+    return np.minimum(mcdc, 400.0)
 
 
 # =============================================================================
@@ -419,20 +438,18 @@ class HourlyFWI:
         """
         sunrise, sunset = sunrise_sunset(self.latitude, day_of_year)
 
-        # Update each point's FFMC (scalar loop — can be vectorized later)
-        for i in range(self.n_points):
-            self.mc_ffmc[i] = hourly_ffmc(
-                self.mc_ffmc[i], temp_c[i], rh[i], ws_kph[i],
-                precip_mm[i], time_increment=1.0,
-            )
-            self.mc_dmc[i] = hourly_dmc(
-                self.mc_dmc[i], hour, temp_c[i], rh[i], precip_mm[i],
-                sunrise, sunset, self.precip_cumulative[i],
-            )
-            self.mc_dc[i] = hourly_dc(
-                self.mc_dc[i], hour, temp_c[i], precip_mm[i],
-                sunrise, sunset, self.precip_cumulative[i],
-            )
+        # Vectorized update — all 28K+ points computed simultaneously via NumPy
+        self.mc_ffmc = hourly_ffmc_vectorized(
+            self.mc_ffmc, temp_c, rh, ws_kph, precip_mm,
+        )
+        self.mc_dmc = hourly_dmc_vectorized(
+            self.mc_dmc, hour, temp_c, rh, precip_mm,
+            sunrise, sunset, self.precip_cumulative,
+        )
+        self.mc_dc = hourly_dc_vectorized(
+            self.mc_dc, hour, temp_c, precip_mm,
+            sunrise, sunset, self.precip_cumulative,
+        )
 
         # Update precipitation accumulator (reset when dry)
         self.precip_cumulative = np.where(
