@@ -251,6 +251,76 @@ class AORCDataLoader:
     # Batch Data Extraction (optimized)
     # ------------------------------------------------------------------
 
+    def get_multiday_point_values(self, year, month, start_day, end_day,
+                                  lat_indices, lon_indices, lat_bounds, lon_bounds):
+        """Extract multiple days of AORC data in a single S3 read.
+
+        AORC ZARR chunks span 144 hours (6 days) on the time axis. Fetching
+        multiple days at once amortizes S3 overhead across chunk boundaries,
+        giving ~5× less redundant data transfer than single-day fetches.
+
+        Args:
+            year, month: Time period.
+            start_day, end_day: Day range (inclusive).
+            lat_indices: Array of latitude indices (full-grid).
+            lon_indices: Array of longitude indices (full-grid).
+            lat_bounds: (lat_min, lat_max) tuple.
+            lon_bounds: (lon_min, lon_max) tuple.
+
+        Returns:
+            dict: day_number → daily_data dict (same format as get_daily_point_values).
+                  Each daily_data has "hours", "timestamps", and variable arrays.
+        """
+        import pandas as pd
+
+        ds = self._open_dataset(year)
+
+        lat_sl, lon_sl, lat_off, lon_off = self._get_bbox_indices(
+            lat_bounds, lon_bounds, year
+        )
+        local_lat, local_lon = self.remap_indices_to_bbox(
+            lat_indices, lon_indices, lat_off, lon_off
+        )
+
+        # Load the full multi-day time range at once
+        start_ts = pd.Timestamp(year, month, start_day, 0)
+        end_ts = pd.Timestamp(year, month, end_day, 23)
+
+        subset = ds.isel(latitude=lat_sl, longitude=lon_sl)
+        multi = subset.sel(time=slice(start_ts, end_ts))
+
+        actual_times = pd.DatetimeIndex(multi.time.values)
+
+        # Load all variable data at once (single S3 read per variable)
+        var_data = {}
+        for var in self.VARIABLES:
+            if var in multi:
+                var_data[var] = multi[var].values[:, local_lat, local_lon]
+
+        # Split by day
+        result = {}
+        for day in range(start_day, end_day + 1):
+            day_mask = actual_times.day == day
+            day_times = actual_times[day_mask]
+
+            if len(day_times) == 0:
+                continue
+
+            daily = {
+                "hours": [t.hour for t in day_times],
+                "timestamps": day_times,
+            }
+            for var, data in var_data.items():
+                daily[var] = data[day_mask]
+
+            result[day] = daily
+
+        logger.debug("Loaded %d days (%d-%02d-%02d to %02d): %d total hours",
+                     len(result), year, month, start_day, end_day,
+                     sum(len(d["hours"]) for d in result.values()))
+
+        return result
+
     def get_daily_point_values(self, year, month, day, lat_indices, lon_indices,
                                lat_bounds, lon_bounds):
         """Extract a full day (24h) of AORC data at point locations.

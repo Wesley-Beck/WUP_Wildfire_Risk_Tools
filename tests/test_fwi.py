@@ -12,7 +12,7 @@ from aorc_tools.fire_indices.fwi import (
     ffmc_to_mc, mc_to_ffmc,
     dmc_to_mc, mc_to_dmc,
     dc_to_mc, mc_to_dc,
-    hourly_ffmc,
+    hourly_ffmc_vectorized,
     initial_spread_index,
     buildup_index,
     fire_weather_index,
@@ -50,24 +50,24 @@ class TestHourlyFFMC:
     def test_drying(self):
         """Hot, dry, windy conditions should dry the fuel."""
         mc_start = ffmc_to_mc(85.0)
-        mc_end = hourly_ffmc(mc_start, temp=30.0, rh=20.0, ws=15.0, rain=0.0)
+        mc_end = hourly_ffmc_vectorized(mc_start, temp=30.0, rh=20.0, ws=15.0, rain=0.0)
         assert mc_end < mc_start
 
     def test_wetting_by_rain(self):
         """Rain should increase moisture content."""
         mc_start = ffmc_to_mc(90.0)  # Dry fuel
-        mc_end = hourly_ffmc(mc_start, temp=15.0, rh=50.0, ws=5.0, rain=5.0)
+        mc_end = hourly_ffmc_vectorized(mc_start, temp=15.0, rh=50.0, ws=5.0, rain=5.0)
         assert mc_end > mc_start
 
     def test_high_humidity_wetting(self):
         """High humidity should wet dry fuel."""
         mc_start = 5.0  # Very dry
-        mc_end = hourly_ffmc(mc_start, temp=10.0, rh=95.0, ws=2.0, rain=0.0)
+        mc_end = hourly_ffmc_vectorized(mc_start, temp=10.0, rh=95.0, ws=2.0, rain=0.0)
         assert mc_end > mc_start
 
     def test_moisture_bounded(self):
         """Moisture content should stay within physical bounds."""
-        mc = hourly_ffmc(200.0, temp=5.0, rh=99.0, ws=0.0, rain=50.0)
+        mc = hourly_ffmc_vectorized(200.0, temp=5.0, rh=99.0, ws=0.0, rain=50.0)
         assert 0 <= mc <= 250
 
 

@@ -77,6 +77,23 @@ def _prefetch_day(loader, year, month, day, lat_indices, lon_indices,
     )
 
 
+def _prefetch_chunk(loader, year, month, start_day, end_day, lat_indices,
+                    lon_indices, lat_bounds, lon_bounds):
+    """Download a multi-day chunk of AORC data (runs in background thread).
+
+    ZARR chunks span 6 days, so loading 6 days at once avoids redundant
+    S3 reads — ~5× less data transfer than single-day fetches.
+    """
+    return loader.get_multiday_point_values(
+        year, month, start_day, end_day,
+        lat_indices, lon_indices, lat_bounds, lon_bounds,
+    )
+
+
+# ZARR time chunk size: 144 hours = 6 days
+CHUNK_DAYS = 6
+
+
 def extract_month(year, month, points_df, output_base, loader=None,
                   fuel_model="G", fuel_moisture_method="emc",
                   fwi_state=None, fm_state=None, latitude=46.5,
@@ -147,119 +164,148 @@ def extract_month(year, month, points_df, output_base, loader=None,
     total_hours = n_days * 24
     hours_processed = 0
 
-    # Parallel prefetch: download next day while processing current day
+    # Chunk-based fetching: load 6 days at once to match ZARR chunk boundaries.
+    # ZARR chunks span 144 hours (6 days) on the time axis, so loading
+    # 6 days amortizes S3 overhead — ~5× less redundant data transfer.
     executor = ThreadPoolExecutor(max_workers=2)
 
+    # Build chunk schedule: [(start_day, end_day), ...]
+    chunks = []
+    d = 1
+    while d <= n_days:
+        end = min(d + CHUNK_DAYS - 1, n_days)
+        chunks.append((d, end))
+        d = end + 1
+
+    # Prefetch first chunk
+    chunk_idx = 0
     prefetch_future = executor.submit(
-        _prefetch_day, loader, year, month, 1,
+        _prefetch_chunk, loader, year, month, chunks[0][0], chunks[0][1],
         lat_indices, lon_indices, lat_bounds, lon_bounds,
     )
 
-    for day in range(1, n_days + 1):
+    for chunk_start, chunk_end in chunks:
         if callback:
             pct = 100.0 * hours_processed / total_hours
-            callback(pct, f"Processing {year}-{month:02d}-{day:02d}...")
+            callback(pct, f"Fetching {year}-{month:02d} days {chunk_start}-{chunk_end}...")
 
         try:
-            daily_data = prefetch_future.result(timeout=120)
+            chunk_data = prefetch_future.result(timeout=300)
         except Exception as e:
-            logger.error("Failed to fetch AORC day %s-%02d-%02d: %s", year, month, day, e)
-            hours_processed += 24
-            if day < n_days:
+            logger.error("Failed to fetch AORC chunk %s-%02d days %d-%d: %s",
+                         year, month, chunk_start, chunk_end, e)
+            hours_processed += (chunk_end - chunk_start + 1) * 24
+            chunk_idx += 1
+            if chunk_idx < len(chunks):
                 prefetch_future = executor.submit(
-                    _prefetch_day, loader, year, month, day + 1,
+                    _prefetch_chunk, loader, year, month,
+                    chunks[chunk_idx][0], chunks[chunk_idx][1],
                     lat_indices, lon_indices, lat_bounds, lon_bounds,
                 )
             continue
 
-        # Prefetch NEXT day while processing this one
-        if day < n_days:
+        # Prefetch NEXT chunk while processing this one
+        chunk_idx += 1
+        if chunk_idx < len(chunks):
             prefetch_future = executor.submit(
-                _prefetch_day, loader, year, month, day + 1,
+                _prefetch_chunk, loader, year, month,
+                chunks[chunk_idx][0], chunks[chunk_idx][1],
                 lat_indices, lon_indices, lat_bounds, lon_bounds,
             )
 
-        actual_hours = daily_data["hours"]
-        actual_timestamps = daily_data["timestamps"]
+        # Process each day in the chunk
+        for day in range(chunk_start, chunk_end + 1):
+            if day not in chunk_data:
+                hours_processed += 24
+                continue
 
-        for h_idx, (hour_val, ts) in enumerate(zip(actual_hours, actual_timestamps)):
-            current = datetime(year, month, day, hour_val)
-            doy = current.timetuple().tm_yday
+            daily_data = chunk_data[day]
 
-            raw = {}
-            for var in loader.VARIABLES:
-                if var in daily_data:
-                    raw[var] = daily_data[var][h_idx]
+            if callback:
+                pct = 100.0 * hours_processed / total_hours
+                callback(pct, f"Processing {year}-{month:02d}-{day:02d}...")
 
-            # Raw AORC
-            if not skip_raw:
+            actual_hours = daily_data["hours"]
+            actual_timestamps = daily_data["timestamps"]
+
+            for h_idx, (hour_val, ts) in enumerate(zip(actual_hours, actual_timestamps)):
+                current = datetime(year, month, day, hour_val)
+                doy = current.timetuple().tm_yday
+
+                raw = {}
+                for var in loader.VARIABLES:
+                    if var in daily_data:
+                        raw[var] = daily_data[var][h_idx]
+
+                # Raw AORC
+                if not skip_raw:
+                    if db:
+                        for var, values in raw.items():
+                            db.add(var, current, values)
+                    if raw_acc:
+                        for var, values in raw.items():
+                            raw_acc.add(var, current, values)
+
+                # Unit conversions
+                temp_k = raw.get("TMP_2maboveground", np.full(n_points, np.nan))
+                spfh = raw.get("SPFH_2maboveground", np.full(n_points, np.nan))
+                pres_pa = raw.get("PRES_surface", np.full(n_points, np.nan))
+                ugrd = raw.get("UGRD_10maboveground", np.full(n_points, np.nan))
+                vgrd = raw.get("VGRD_10maboveground", np.full(n_points, np.nan))
+                precip_mm = raw.get("APCP_surface", np.full(n_points, np.nan))
+
+                temp_c = kelvin_to_celsius(temp_k)
+                temp_f = celsius_to_fahrenheit(temp_c)
+                rh = specific_to_relative_humidity(spfh, temp_k, pres_pa)
+                ws_ms = wind_components_to_speed(ugrd, vgrd)
+                ws_kph = ms_to_kph(ws_ms)
+                ws_mph = ms_to_mph(ws_ms)
+
+                converted = {
+                    "temperature_c": temp_c, "temperature_f": temp_f,
+                    "relative_humidity": rh, "wind_speed_ms": ws_ms,
+                    "wind_speed_kph": ws_kph, "wind_speed_mph": ws_mph,
+                    "precipitation_mm": precip_mm,
+                }
                 if db:
-                    for var, values in raw.items():
-                        db.add(var, current, values)
-                if raw_acc:
-                    for var, values in raw.items():
-                        raw_acc.add(var, current, values)
+                    for key, values in converted.items():
+                        db.add(key, current, values)
+                if conv_acc:
+                    for key, values in converted.items():
+                        conv_acc.add(key, current, values)
 
-            # Unit conversions
-            temp_k = raw.get("TMP_2maboveground", np.full(n_points, np.nan))
-            spfh = raw.get("SPFH_2maboveground", np.full(n_points, np.nan))
-            pres_pa = raw.get("PRES_surface", np.full(n_points, np.nan))
-            ugrd = raw.get("UGRD_10maboveground", np.full(n_points, np.nan))
-            vgrd = raw.get("VGRD_10maboveground", np.full(n_points, np.nan))
-            precip_mm = raw.get("APCP_surface", np.full(n_points, np.nan))
+                # Canadian FWI
+                fwi_result = fwi.update(temp_c, rh, ws_kph, precip_mm, doy, current.hour)
+                if db:
+                    for key, values in fwi_result.items():
+                        db.add(key, current, values)
+                if cfwi_acc:
+                    for key, values in fwi_result.items():
+                        cfwi_acc.add(key, current, values)
 
-            temp_c = kelvin_to_celsius(temp_k)
-            temp_f = celsius_to_fahrenheit(temp_c)
-            rh = specific_to_relative_humidity(spfh, temp_k, pres_pa)
-            ws_ms = wind_components_to_speed(ugrd, vgrd)
-            ws_kph = ms_to_kph(ws_ms)
-            ws_mph = ms_to_mph(ws_ms)
+                # NFDRS
+                if fuel_moisture_method == "nelson" and fm_model is not None:
+                    fm = fm_model.update(temp_f, rh, precip_mm)
+                else:
+                    fm = emc_fuel_moisture(temp_f, rh)
 
-            converted = {
-                "temperature_c": temp_c, "temperature_f": temp_f,
-                "relative_humidity": rh, "wind_speed_ms": ws_ms,
-                "wind_speed_kph": ws_kph, "wind_speed_mph": ws_mph,
-                "precipitation_mm": precip_mm,
-            }
-            if db:
-                for key, values in converted.items():
-                    db.add(key, current, values)
-            if conv_acc:
-                for key, values in converted.items():
-                    conv_acc.add(key, current, values)
+                all_nfdrs = {"FM1": fm["fm1"], "FM10": fm["fm10"],
+                             "FM100": fm["fm100"], "FM1000": fm["fm1000"]}
+                nfdrs_result = compute_erc_bi(
+                    fm["fm1"], fm["fm10"], fm["fm100"], fm["fm1000"],
+                    np.full(n_points, 120.0), np.full(n_points, 100.0),
+                    ws_mph, fuel_model=fuel_model,
+                )
+                all_nfdrs.update(nfdrs_result)
 
-            # Canadian FWI
-            fwi_result = fwi.update(temp_c, rh, ws_kph, precip_mm, doy, current.hour)
-            if db:
-                for key, values in fwi_result.items():
-                    db.add(key, current, values)
-            if cfwi_acc:
-                for key, values in fwi_result.items():
-                    cfwi_acc.add(key, current, values)
+                if db:
+                    for key, values in all_nfdrs.items():
+                        db.add(key, current, values)
+                if nfdrs_acc:
+                    for key, values in all_nfdrs.items():
+                        nfdrs_acc.add(key, current, values)
 
-            # NFDRS
-            if fuel_moisture_method == "nelson" and fm_model is not None:
-                fm = fm_model.update(temp_f, rh, precip_mm)
-            else:
-                fm = emc_fuel_moisture(temp_f, rh)
-
-            all_nfdrs = {"FM1": fm["fm1"], "FM10": fm["fm10"],
-                         "FM100": fm["fm100"], "FM1000": fm["fm1000"]}
-            nfdrs_result = compute_erc_bi(
-                fm["fm1"], fm["fm10"], fm["fm100"], fm["fm1000"],
-                np.full(n_points, 120.0), np.full(n_points, 100.0),
-                ws_mph, fuel_model=fuel_model,
-            )
-            all_nfdrs.update(nfdrs_result)
-
-            if db:
-                for key, values in all_nfdrs.items():
-                    db.add(key, current, values)
-            if nfdrs_acc:
-                for key, values in all_nfdrs.items():
-                    nfdrs_acc.add(key, current, values)
-
-            hours_processed += 1
+                hours_processed += 1
 
     executor.shutdown(wait=False)
 
