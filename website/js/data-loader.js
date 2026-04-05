@@ -74,13 +74,89 @@ const DataLoader = {
     },
 
     /**
-     * Load a monthly data CSV. Returns compact array-based format.
+     * Load monthly data — tries binary .bin first (instant), falls back to CSV.
      *
      * @returns {Promise<Object>} {
      *   timestamps: string[],
      *   data: Float32Array[],  // data[hourIndex] = Float32Array of nPoints values
      *   pointIdToIndex: Map,   // shared reference
      * }
+     */
+    async loadMonthlyData(year, month, layerPath) {
+        const cacheKey = `${year}/${String(month).padStart(2, "0")}/${layerPath}`;
+        if (this.cache.has(cacheKey)) {
+            const entry = this.cache.get(cacheKey);
+            this.cache.delete(cacheKey);
+            this.cache.set(cacheKey, entry);
+            return entry;
+        }
+
+        const generation = ++this._loadGeneration;
+        const monthStr = String(month).padStart(2, "0");
+        const parts = layerPath.split("/");
+        const variable = parts.length > 1 ? parts[1] : parts[0];
+
+        // Try binary first
+        const binUrl = `${this.basePath}/${year}/${monthStr}/web/${variable}.bin`;
+        try {
+            const resp = await fetch(binUrl);
+            if (resp.ok) {
+                if (generation !== this._loadGeneration) throw new Error("Request superseded");
+                const buf = await resp.arrayBuffer();
+                const parsed = this._parseBinary(buf);
+                this._cacheSet(cacheKey, parsed);
+                console.log(`Loaded ${binUrl} (binary, ${(buf.byteLength / 1048576).toFixed(1)} MB)`);
+                return parsed;
+            }
+        } catch (e) {
+            if (e.message === "Request superseded") throw e;
+            // Binary not available, fall back to CSV
+        }
+
+        // Fall back to CSV
+        return this.loadMonthlyCSV(year, month, layerPath);
+    },
+
+    /**
+     * Parse a binary .bin file into the standard data format.
+     * Format: uint32 n_points, uint32 n_hours, uint32 ts_block_len,
+     *         ts_block (UTF-8 newline-separated timestamps),
+     *         n_hours × n_points float32 values.
+     */
+    _parseBinary(buffer) {
+        const view = new DataView(buffer);
+        let offset = 0;
+
+        const nPoints = view.getUint32(offset, true); offset += 4;
+        const nHours = view.getUint32(offset, true); offset += 4;
+        const tsBlockLen = view.getUint32(offset, true); offset += 4;
+
+        // Decode timestamp strings
+        const tsBytes = new Uint8Array(buffer, offset, tsBlockLen);
+        const tsText = new TextDecoder().decode(tsBytes);
+        const timestamps = tsText.split("\n");
+        offset += tsBlockLen;
+
+        // Read float32 arrays for each hour
+        const data = new Array(nHours);
+        for (let h = 0; h < nHours; h++) {
+            data[h] = new Float32Array(buffer, offset, nPoints);
+            offset += nPoints * 4;
+        }
+
+        return { timestamps, data, pointIdToIndex: this.pointIdToIndex };
+    },
+
+    _cacheSet(key, value) {
+        if (this.cache.size >= this.MAX_CACHE) {
+            const oldest = this.cache.keys().next().value;
+            this.cache.delete(oldest);
+        }
+        this.cache.set(key, value);
+    },
+
+    /**
+     * Load monthly data from CSV (fallback when .bin not available).
      */
     loadMonthlyCSV(year, month, layerPath) {
         const monthStr = String(month).padStart(2, "0");
@@ -153,13 +229,7 @@ const DataLoader = {
                         pointIdToIndex: this.pointIdToIndex,
                     };
 
-                    // LRU eviction: remove oldest entry if cache is full
-                    if (this.cache.size >= this.MAX_CACHE) {
-                        const oldest = this.cache.keys().next().value;
-                        console.log(`Evicting cached data: ${oldest}`);
-                        this.cache.delete(oldest);
-                    }
-                    this.cache.set(cacheKey, parsed);
+                    this._cacheSet(cacheKey, parsed);
 
                     console.log(`Loaded ${url}: ${this.nPoints} points, ${nHours} hours (${(nHours * this.nPoints * 4 / 1048576).toFixed(0)} MB)`);
                     resolve(parsed);

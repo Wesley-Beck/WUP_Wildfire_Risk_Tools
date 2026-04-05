@@ -95,10 +95,14 @@
                 <!-- Time Controls -->
                 <section class="panel" id="time-panel">
                     <h3>Time</h3>
+
+                    <!-- Year selector at top -->
                     <div class="input-group">
                         <label for="year-select">Year</label>
                         <select id="year-select"></select>
                     </div>
+
+                    <!-- Month selector changes calendar layout -->
                     <div class="input-group">
                         <label for="month-select">Month</label>
                         <select id="month-select">
@@ -116,14 +120,39 @@
                             <option value="12">December</option>
                         </select>
                     </div>
-                    <div class="input-group">
-                        <label for="day-select">Day</label>
-                        <select id="day-select"></select>
+
+                    <!-- Mini calendar grid for day selection -->
+                    <div id="calendar-grid">
+                        <div class="cal-header">
+                            <span>Su</span><span>Mo</span><span>Tu</span>
+                            <span>We</span><span>Th</span><span>Fr</span><span>Sa</span>
+                        </div>
+                        <div id="cal-days"></div>
                     </div>
+
+                    <!-- Date range display -->
+                    <div id="range-display" class="meta-note" style="text-align:center; margin: 4px 0;">
+                        Select start &amp; end days above
+                    </div>
+
+                    <!-- Hour slider -->
                     <div class="input-group">
                         <label for="hour-slider">Hour: <span id="hour-display">12:00</span></label>
                         <input type="range" id="hour-slider" min="0" max="23" value="12" />
                     </div>
+
+                    <!-- Playback controls -->
+                    <div id="playback-controls">
+                        <button id="play-btn" class="btn btn-play" title="Play/Pause">&#9654;</button>
+                        <input type="range" id="playback-slider" min="0" max="0" value="0" />
+                        <select id="speed-select" title="Playback speed">
+                            <option value="500">Slow</option>
+                            <option value="200" selected>Normal</option>
+                            <option value="50">Fast</option>
+                        </select>
+                    </div>
+
+                    <!-- Current time display -->
                     <div class="time-display" id="full-time-display">
                         2020-07-15 12:00
                     </div>

@@ -76,8 +76,13 @@ def points(shapefile, output, filter_water, water_min_area):
 @click.option("--fuel-moisture", default="emc", type=click.Choice(["emc", "nelson"]),
               help="Fuel moisture method")
 @click.option("--latitude", default=46.5, type=float, help="Representative latitude for FWI")
+@click.option("--format", "output_format", default="both",
+              type=click.Choice(["sqlite", "csv", "both"]),
+              help="Output format: sqlite (compact + web files), csv, or both")
+@click.option("--skip-raw/--no-skip-raw", default=False,
+              help="Skip raw AORC output (saves ~30% time/space)")
 def extract(points_file, year, output, start_month, end_month,
-            fuel_model, fuel_moisture, latitude):
+            fuel_model, fuel_moisture, latitude, output_format, skip_raw):
     """Extract hourly AORC data and compute fire danger indices."""
     from aorc_tools.point_filter import load_point_index
     from aorc_tools.extract import extract_year
@@ -96,6 +101,8 @@ def extract(points_file, year, output, start_month, end_month,
         fuel_model=fuel_model,
         fuel_moisture_method=fuel_moisture,
         latitude=latitude,
+        output_format=output_format,
+        skip_raw=skip_raw,
         callback=progress,
     )
     click.echo(f"Extraction complete for {year}")

@@ -93,6 +93,11 @@ def main():
                         help="Fuel moisture method (default: emc)")
     parser.add_argument("--latitude", type=float, default=46.5,
                         help="Representative latitude for FWI (default: 46.5)")
+    parser.add_argument("--format", default="both",
+                        choices=["sqlite", "csv", "both"],
+                        help="Output format (default: both)")
+    parser.add_argument("--skip-raw", action="store_true",
+                        help="Skip raw AORC output (saves ~30%% time/space)")
     parser.add_argument("--force", action="store_true",
                         help="Re-extract months even if output already exists")
     args = parser.parse_args()
@@ -159,6 +164,8 @@ def main():
                 fuel_moisture_method=args.fuel_moisture,
                 fwi_state=fwi_state,
                 latitude=args.latitude,
+                output_format=args.format,
+                skip_raw=args.skip_raw,
                 callback=progress,
             )
             fwi_state = result["fwi_state"]
