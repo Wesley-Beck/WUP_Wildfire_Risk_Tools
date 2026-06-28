@@ -1,0 +1,94 @@
+# CLAUDE.md — WUP Wildfire Risk Indices (NAPS 2026)
+
+Source of truth for any Claude Code session (local, EC2, HPC, or web). Keep updated as
+decisions change. Web-chat Claude = design/review; Claude Code = execution; this file + the
+scripts/briefs/source in this repo are the shared context. New session? Read this, then
+`docs/orchestration_brief.md`.
+
+## Goal & deadline
+Compute four fire-danger indices (FPI, FWI, ERC, BI) for Michigan's Western Upper Peninsula
+(six WUPPDR counties: Baraga, Gogebic, Houghton, Iron, Keweenaw, Ontonagon + Isle Royale) at
+800 m / hourly from NOAA AORC v1.1. Coverage: FWI/ERC/BI = full 1979–2026; FPI = 2000–2026
+(MODIS-era NDVI, Option 1 — see below). NAPS 2026 manuscript (IEEE PES, 6 pp) is a
+METHODS + DATA paper: methodology, motivation, and the computed dataset reported as regional
+analysis, with all stipulations. Index validation vs observed fires and GLARM projection are
+COMPANION papers. Deadline: July 1, 2026 (no resubmission).
+
+## Repo contents
+- `CLAUDE.md` (this file) · `README.md`
+- `docs/orchestration_brief.md` — 5-step plan (verify → fix → resolve → compute → re-verify)
+- `docs/manuscript_draft_v4.md` — current draft
+- `scripts/verify_index_implementations.py` · `scripts/verify_computed_data.py` · `scripts/batch_compute_remaining_years.py`
+- `src/` — program1 (extraction) + wildfire_indices module
+- `data/points/` — AORC points CSV + shapefiles (committed; small)
+- `data/output/`, `data/cache/`, `data/raw/` — NOT in git (see .gitignore); local only
+
+## Index implementation decisions (current)
+- **FWI = xclim** (`xclim.indices.fire.cffwis_indices`, `drought_code`, `fire_season`). Validated
+  (<3% vs Field et al. 2015); handles overwintering. Cite Wang et al. 2015; Cantin et al. 2014; xclim.
+  Replace hand-rolled FWI; validate sample points both ways. Report native FWI AND its percentile.
+- **FPI = recompute CORRECTLY (Burgan), MODIS-era 2000–2026 [OPTION 1 — LOCKED].** FWI/ERC/BI
+  cover full 1979–2026; FPI covers 2000–2026 only, because validated 250–500 m satellite NDVI
+  begins with MODIS (Terra) in 2000 (pre-2000 is only ~5 km AVHRR, which would break the 800 m
+  premise). State this coverage difference explicitly in the paper — it is a feature, not a gap.
+  Implementation: (a) NDVI = MODIS MOD13Q1 (16-day, 250 m; finer than 800 m so aggregate up),
+  QA-screened; (b) build the per-pixel relative-greenness envelope `RG=(ND-ND_min)/(ND_max-ND_min)`
+  from the 2000–2026 growing-season MODIS archive; (c) LANDFIRE fuel model (recent, applied across
+  years) -> moisture of extinction + loadings (replaces create_default placeholders); (d) regrid
+  MODIS + LANDFIRE onto the 800 m AORC grid (rioxarray/GDAL warp); (e) interpolate 16-day NDVI to
+  daily, hold across hours — greenness term daily, EMC (T/RH) term hourly. Cite Burgan, Klaver &
+  Klaver 1998. Real-NDVI FPI for the full record is NOT attempted here.
+- **ERC / BI = DERIVED (simplified), reported as PERCENTILES, honestly labeled** (NOT cited as NFDRS).
+  Stop clipping to 0-100 (they are open-ended). Confirmed by Wesley.
+
+## Percentile methodology (for ERC/BI; optional for FWI/FPI cross-comparison)
+Raw per-year index values are the canonical durable outputs; percentiles are a cheap post-pass
+computed ONCE after the full raw record exists (re-run if 2026 updates arrive).
+For each cell, replace each daily value by its empirical percentile in the chosen reference
+distribution. Three choices to STATE in the paper:
+1. Reference pool: pooled-regional (preserves spatial differences) vs per-cell (normalizes spatial
+   bias but erases "where is worst"). Default = pooled-regional for the spatial figures.
+2. Reference window: whole-season (keeps seasonal cycle; for climatology figure) vs day-of-year
+   ±15 d (gives anomalies; for outlier panel). Use both for their respective figures.
+3. Reference period: full 1979-2026 (spans AORC source-stream changes -> disclose) vs a homogeneous
+   sub-period. State which. NOTE: ERC/BI percentiles use 1979-2026; FPI percentiles (if reported) use
+   2000-2026 — different N. Any inter-index agreement comparison that includes FPI MUST be restricted
+   to the 2000-2026 overlap window so it is apples-to-apples.
+Percentiles make open-ended/derived indices fairly REPORTABLE and put all four on a common 0-100
+scale for inter-index comparison. They are NOT validation and do NOT make a simplified index correct.
+
+## AORC stipulations (must appear in the paper)
+- Effective resolution differs by variable: precip & temperature true ~800 m, well-validated (incl.
+  Great Lakes, Hong et al. 2022; temp within ~2 °C). 10 m wind & shortwave are NLDAS-2 (~12 km)
+  bilinearly interpolated; humidity NLDAS-2-derived. Refinement over Argonne (12 km) genuine for
+  precip/temp, partial for wind/humidity.
+- Not temporally homogeneous: precip source streams change by era; non-precip methodology breaks ~end-2015.
+- Apr 2, 2026 AWS advisory: ~0.04% rows incorrectly masked; Zarr regenerated. Use corrected data; record version.
+
+## Pipeline (see orchestration brief)
+1. Verify existing 1979-2002 (laptop OK; data is local). Report ground truth FIRST.
+2. Fix FWI -> xclim.
+3. Resolve FPI (Burgan, MODIS NDVI 2000-2026 per Option 1) + ERC/BI (derived + percentile).
+   SEQUENCING: FWI/ERC/BI are ready now — run their full 1979-2026 record first; build the FPI
+   NDVI/LANDFIRE pipeline in parallel and slot FPI (2000-2026) in last, so the NDVI work doesn't
+   block the bulk of the dataset before the deadline.
+4. Compute 1979-2026 year-by-year with the finalized implementation (recompute 1979-2002 if its path
+   differs). Atomic writes; per-year QA; cache raw downloads separately from outputs.
+5. Re-verify full record (every file PASS; no uniform fields; ERC/BI not clipped; FWI continuity
+   across year boundaries; full coverage).
+
+## Run safely, year-by-year (this is I/O-bound, not FLOPS-bound)
+batch_compute_remaining_years.py: skips done years (resume), chains FWI state, logs, checks disk.
+Add: atomic CSV writes (write .tmp then os.replace), per-year verify call, raw-download cache so a
+recompute doesn't re-pull S3. Canonical outputs = raw per-year index values; everything else derived.
+Compute next to the data: EC2 in the AORC bucket region (NOAA Open Data ~us-east-1 — confirm), or
+MTU HPC (check node S3 access), or Claude Code web (verify S3 network access; 30 GB disk -> year-by-year).
+Fetch only needed variables/hours (solar-noon + 24-h precip sum for daily indices).
+
+## Citations to verify (essentials)
+Fall et al. 2023 (AORC, JAWRA, 10.1111/1752-1688.13143); Van Wagner 1987 / Van Wagner & Pickett 1985 (FWI);
+Wang et al. 2015 + Cantin et al. 2014 + xclim (FWI impl); Burgan, Klaver & Klaver 1998 (FPI — once real NDVI);
+Heinsch et al. 2009 + NWCG PMS 437 (ERC/BI percentiles, Lake States BUI); Deeming et al. 1977 / Cohen &
+Deeming 1985 (NFDRS — only if canonical, not used for derived ERC/BI); Alexander & de Groot 1988 (FWI jack
+pine); Hong et al. 2022 (AORC Great Lakes); Eidenshink et al. 2007 (MTBS); Lin et al. 2024 (geographic bias);
+Argonne CONUS multi-index study (confirm; poss. Earth's Future 2023, 10.1029/2023EF003823); GLARM reference.
