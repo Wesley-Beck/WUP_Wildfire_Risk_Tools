@@ -29,7 +29,7 @@ from pathlib import Path
 PACKAGES = [("numpy", True), ("pandas", True), ("xarray", True), ("zarr", True), ("s3fs", True), ("fsspec", True),
             ("netCDF4", True), ("cftime", True), ("flask", True), ("shapely", True), ("tzdata", True), ("openpyxl", True),
             ("rasterio", False), ("pystac_client", False), ("planetary_computer", False), ("h5netcdf", False),
-            ("h5py", False), ("requests", False)]
+            ("h5py", False), ("requests", False), ("shapefile", False)]
 
 
 class Report:
