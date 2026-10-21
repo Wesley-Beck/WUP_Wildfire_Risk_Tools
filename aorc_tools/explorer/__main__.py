@@ -121,11 +121,15 @@ def main(argv=None):
                    help="download current power lines for the study area (osm, or an ArcGIS source listed in the Lines tab)")
     g.add_argument("--lines", nargs="?", const="all", metavar="LAYER", default=None,
                    help="analyse fire danger along line layers (default all; --full-record does this at the end)")
+    g.add_argument("--patterns", action="store_true",
+                   help="season windows, groupings of high-danger cells, daily vs hourly FWI (--full-record does this at the end)")
+    g.add_argument("--drivers", nargs="?", const="12", metavar="CELLS",
+                   help="which weather variable drives each index, per brick (re-runs a sample of CELLS cells per brick; default 12)")
     g.add_argument("--self-test", action="store_true",
                    help="check this computer (packages, disk, folders, network) and run a short end-to-end test; writes a report")
     args = ap.parse_args(argv)
     headless = any([args.fire_checks, args.download_aorc, args.ingest_ndvi, args.compute, args.verify, args.full_record,
-                    args.bundle, args.repair, args.lines_download, args.lines])
+                    args.bundle, args.repair, args.lines_download, args.lines, args.patterns, args.drivers])
 
     base = base_dir()
     ws_dir = (Path(args.workspace) if args.workspace else default_workspace(base)).expanduser().resolve()
@@ -460,6 +464,27 @@ def run_headless(ws_dir, source, static_dir, output, args) -> int:
                     print(f"    FWI days above the 90th percentile per year: corridor {ix['corridor']['days_p90']}, region "
                           f"{ix['region']['days_p90']}; trend corridor {fmt(tr.get('corridor'))}, region {fmt(tr.get('region'))}")
                 print(f"    results: {t['result']['dir']}")
+    if args.patterns or (args.full_record and rc == 0):
+        print("\n[P] Patterns: season windows, groupings, daily vs hourly FWI")
+        t = run_task(c.post("/api/patterns/run", json={"config": cfg.as_dict(), "source": src_name}))
+        if t and t.get("result"):
+            sm = E["patterns"].summary(t["result"]["id"])
+            env = (((sm["indices"].get("FWI") or {}).get("areas") or {}).get("WUP mainland") or {}).get("envelope") or {}
+            for w in ("spring", "fall"):
+                e_ = (env.get(w) or {}).get("last_20_years")
+                if e_:
+                    print(f"    FWI {w} high-danger window, last 20 years: {e_['from_date']} -> {e_['to_date']} "
+                          f"(median {e_['median_start']} -> {e_['median_end']})")
+            dv = sm.get("daily_vs_hourly")
+            if dv:
+                print(f"    daily vs hourly FWI: rank r {dv['mainland'].get('rank_r')}, kappa {dv['mainland'].get('kappa')}, "
+                      f"daily adequate in {dv.get('share_daily_adequate')} of mainland cells")
+            print(f"    results: {t['result']['dir']}")
+    if args.drivers:
+        print(f"\n[D] Driving variables per brick ({args.drivers} cells per brick, March-November of every year)")
+        t = run_task(c.post("/api/drivers/run", json={"config": cfg.as_dict(), "source": src_name, "cells_per_brick": int(args.drivers)}))
+        if t and t.get("result"):
+            print(f"    {t['result']['rows']:,} cell-days analysed -> {t['result']['dir']}")
     if args.bundle:
         print(f"\n[5] Research bundle -> {args.bundle}")
         t = run_task(c.post("/api/bundle", json={"path": args.bundle, "parts": args.bundle_parts.split(",")}))

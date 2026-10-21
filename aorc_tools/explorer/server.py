@@ -183,8 +183,13 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
     from aorc_tools.explorer import lines as linesmod
     line_layers = linesmod.LineLayers(ws, grid)
     line_analysis = linesmod.LineAnalysis(ws, grid, store, line_layers)
+    from aorc_tools.explorer.patterns import PatternAnalysis
+    from aorc_tools.explorer.drivers import DriverAnalysis
+    patterns = PatternAnalysis(ws, grid, store)
+    drivers = DriverAnalysis(ws, grid, store, ctx)
     app.extensions["wup"] = {"ws": ws, "grid": grid, "ctx": ctx, "store": store, "jobs": jobs, "fires": fire_catalog,
-                             "tasks": tasks, "lines": line_layers, "line_analysis": line_analysis}
+                             "tasks": tasks, "lines": line_layers, "line_analysis": line_analysis, "patterns": patterns,
+                             "drivers": drivers}
     live_lock = threading.Semaphore(1)                  # one live calculation at a time (memory)
     if start_jobs:
         jobs.start()
@@ -1330,6 +1335,113 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
         except KeyError as e:
             return err(str(e), 404)
         return send_file(path, as_attachment=request.args.get("inline") != "1", download_name=f"{aid}_{name}")
+
+    # ------------------------------------------------------------------ patterns: season windows, groupings, daily vs hourly
+    def _patterns_task(tid, params, progress):
+        return patterns.run(params["source"], params["config_id"], indices=params.get("indices"), years=params.get("years"),
+                            ref_years=params.get("ref_years"), season_pct=params.get("season_pct", 80),
+                            cluster_pct=params.get("cluster_pct", 95), progress=progress)
+
+    tasks.register("patterns", _patterns_task)
+
+    @app.post("/api/patterns/run")
+    def patterns_run():
+        b = body()
+        cfg = cfg_from(b)
+        source = b.get("source") or ctx.active
+        idx = b.get("indices")
+        if idx is not None and (not isinstance(idx, list) or not set(idx) <= set(linesmod.INDICES)):
+            raise ValueError(f"indices must be a list from {linesmod.INDICES}")
+        sp, cp = float(b.get("season_pct", 80)), float(b.get("cluster_pct", 95))
+        if not (50 <= sp <= 99 and 50 <= cp <= 99.9):
+            raise ValueError("percentiles must be 50-99")
+        tid = tasks.create("patterns", f"Patterns ({source} {cfg.id})",
+                           {"source": source, "config_id": cfg.id, "indices": idx, "years": _years_arg(b.get("years")),
+                            "ref_years": _years_arg(b.get("ref_years")), "season_pct": sp, "cluster_pct": cp})
+        if b.get("wait"):
+            tasks.run_now(tid)
+        return jsonify(tasks.get(tid))
+
+    @app.get("/api/patterns")
+    def patterns_list():
+        return jsonify({"analyses": patterns.list()})
+
+    @app.get("/api/patterns/<aid>")
+    def patterns_summary(aid):
+        try:
+            return jsonify(patterns.summary(aid))
+        except KeyError as e:
+            return err(str(e), 404)
+
+    @app.get("/api/patterns/<aid>/cells")
+    def patterns_cells(aid):
+        try:
+            pids, vals = patterns.cell_field(aid, request.args.get("key", "FWI.spring_start_median"))
+        except KeyError as e:
+            return err(str(e), 404)
+        fin = np.isfinite(vals)
+        lo, hi = (float(np.nanpercentile(vals, 2)), float(np.nanpercentile(vals, 98))) if fin.any() else (0.0, 1.0)
+        return jsonify({"point_ids": pids.tolist(), "values": [None if not np.isfinite(x) else round(float(x), 4) for x in vals],
+                        "lo": lo, "hi": hi if hi > lo else lo + 1})
+
+    @app.get("/api/patterns/<aid>/table/<name>")
+    def patterns_table(aid, name):
+        try:
+            df = patterns.table(aid, name)
+        except KeyError as e:
+            return err(str(e), 404)
+        for k in ("index", "area", "window"):
+            if k in request.args and k in df:
+                df = df[df[k] == request.args[k]]
+        return jsonify({"rows": json.loads(df.head(20000).to_json(orient="records"))})
+
+    @app.get("/api/patterns/<aid>/file/<name>")
+    def patterns_file(aid, name):
+        try:
+            path = patterns.file(aid, name)
+        except KeyError as e:
+            return err(str(e), 404)
+        return send_file(path, as_attachment=request.args.get("inline") != "1", download_name=f"patterns_{aid}_{name}")
+
+    # ------------------------------------------------------------------ driving variables per brick
+    def _drivers_task(tid, params, progress):
+        return drivers.run(params["source"], ChainConfig.from_dict(params["config"]), years=params.get("years"),
+                           n_per_brick=int(params.get("cells_per_brick", 12)), progress=progress)
+
+    tasks.register("drivers", _drivers_task)
+
+    @app.post("/api/drivers/run")
+    def drivers_run():
+        b = body()
+        cfg = cfg_from(b)
+        source = b.get("source") or ctx.active
+        n = int(b.get("cells_per_brick", 12))
+        if not 2 <= n <= 100:
+            raise ValueError("cells_per_brick must be 2-100")
+        tid = tasks.create("drivers", f"Driving variables ({source} {cfg.id})",
+                           {"source": source, "config": cfg.as_dict(), "years": _years_arg(b.get("years")), "cells_per_brick": n})
+        if b.get("wait"):
+            tasks.run_now(tid)
+        return jsonify(tasks.get(tid))
+
+    @app.get("/api/drivers")
+    def drivers_list():
+        return jsonify({"analyses": drivers.list()})
+
+    @app.get("/api/drivers/<aid>")
+    def drivers_summary(aid):
+        try:
+            return jsonify(drivers.summary(aid))
+        except KeyError as e:
+            return err(str(e), 404)
+
+    @app.get("/api/drivers/<aid>/file/<name>")
+    def drivers_file(aid, name):
+        try:
+            path = drivers.file(aid, name)
+        except KeyError as e:
+            return err(str(e), 404)
+        return send_file(path, as_attachment=True, download_name=f"drivers_{aid}_{name}")
 
     @app.post("/api/shutdown")
     def shutdown():

@@ -284,7 +284,7 @@
       $('c-fuel').innerHTML = Object.entries(status.fuel_models).map(([k, n]) => `<option value="${k}">${k} — ${W.esc(n)}</option>`).join('');
       $('fdichecks').innerHTML = W.FDI.map(f => `<label class="chk"><input type="checkbox" class="fdi" value="${f}" checked><span class="dot" style="background:${W.COLOR[f]}"></span>${f}</label>`).join('');
       await W.initMap(); W.addLayers(); wire();
-      W.loadFires(); W.loadLines();
+      W.loadFires(); W.loadLines(); W.loadPatterns();
       W.map.fitBounds([[grid.bbox[0], grid.bbox[1]], [grid.bbox[2], grid.bbox[3]]], { padding: 24, duration: 0 });
       W.applyCfg(status.presets['hourly-default']);
       W.legend('no layer', 0, 1); W.setMode('cell'); W.onWindowChanged();

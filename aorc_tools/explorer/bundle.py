@@ -48,7 +48,7 @@ PARTS = {
     "ndvi": "NDVI composites, relative-greenness envelope and fuel models (FPI inputs)",
     "inputs_datasets": "Offline copies of climate-model datasets (WUP window), e.g. GLARM",
     "catalog": "Workspace catalog, settings, jobs, fire catalog and checks, dataset definitions, reports",
-    "lines": "Power-line layers (downloaded / imported) and their fire-danger analyses",
+    "lines": "Analyses: power-line layers and line exposure, season windows, groupings, daily vs hourly FWI",
     "daily": "Daily maxima per year (built from the hourly results; quick to rebuild, so off by default)",
 }
 DEFAULT_OFF = {"daily"}
@@ -154,7 +154,7 @@ def plan(ws, ctx, parts=None, results_filter=None) -> dict:
         sd = Path(ctx.static_dir)
         for p in _walk(sd):
             files["ndvi"].append((f"{W}/inputs/static/{p.relative_to(sd).as_posix()}", p))
-    for part, d in (("lines", "lines"), ("daily", "daily")):
+    for part, d in (("lines", "lines"), ("lines", "patterns"), ("daily", "daily")):
         if part in parts:
             for p in _walk(ws.root / d):
                 files[part].append((f"{W}/{p.relative_to(ws.root).as_posix()}", p))

@@ -802,6 +802,25 @@ def _fmt_doy(d, year=2001):
     return (pd.Timestamp(year, 1, 1) + pd.Timedelta(days=int(round(float(d))))).strftime("%b %d")
 
 
+def read_daily_vars(store, path, names):
+    """Raw packed arrays (n_days, n_cells) of the named variables in a daily file (missing names are left out)."""
+    import netCDF4
+    out = {}
+    with HDF_LOCK, netCDF4.Dataset(path) as ds:
+        for n in names:
+            if n in ds.variables:
+                var = ds[n]
+                var.set_auto_maskandscale(False)
+                out[n] = np.asarray(var[:])[:, store.y, store.x]
+    return out
+
+
+def cell_area_km2(grid):
+    """Area of each study cell (1/120 degree square) in km2."""
+    lat = grid.points.latitude.values
+    return (grid.step * 111.2) ** 2 * np.cos(np.radians(lat))
+
+
 # =============================================================================================== analysis
 
 class LineAnalysis:

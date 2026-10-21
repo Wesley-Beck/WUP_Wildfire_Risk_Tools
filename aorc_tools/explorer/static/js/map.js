@@ -189,7 +189,8 @@
       $('legend-min').textContent = '0 native'; $('legend-mid').textContent = '2–4 neighbours'; $('legend-max').textContent = '9 none';
     } else {
       $('legend-bar').style.background = `linear-gradient(to right, ${(diverging ? W.DIVERGE : W.RAMP).join(',')})`;
-      $('legend-min').textContent = W.fmt(lo, 0); $('legend-mid').textContent = W.fmt((lo + hi) / 2, 0); $('legend-max').textContent = W.fmt(hi, 0);
+      const nd = Math.abs(hi - lo) < 5 ? 2 : 0;
+      $('legend-min').textContent = W.fmt(lo, nd); $('legend-mid').textContent = W.fmt((lo + hi) / 2, nd); $('legend-max').textContent = W.fmt(hi, nd);
     }
     $('legend-extra').textContent = extra || '';
   };
