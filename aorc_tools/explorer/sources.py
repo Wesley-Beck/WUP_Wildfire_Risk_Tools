@@ -146,6 +146,11 @@ class BaseSource:
     def origin_of_year(self, year: int) -> datetime:
         return datetime(1979, 2, 1) if year == 1979 else datetime(year, 1, 1)
 
+    def domain(self, settings: dict):
+        """(first hour, last hour) this source can provide; AORC-shaped sources use the workspace setting."""
+        return (pd.Timestamp(settings.get("domain_start", "1979-02-01T00")).to_pydatetime(),
+                pd.Timestamp(settings.get("domain_end", "2026-09-30T23")).to_pydatetime())
+
     def status(self) -> dict:
         return {"name": self.name, "description": self.description, "synthetic": self.synthetic}
 
@@ -340,23 +345,44 @@ class SyntheticSource(BaseSource):
 # Real AORC on S3
 # ---------------------------------------------------------------------------
 
+class OfflineMissing(RuntimeError):
+    """Raised in offline mode when a brick/time chunk is not in the local input store."""
+
+
 class AORCSource(BaseSource):
-    """NOAA AORC v1.1 on S3, read brick-by-brick through the existing
-    ``AORCDataLoader`` (same five-method fallback), with a disk cache."""
+    """NOAA AORC v1.1, read brick-by-brick.
+
+    Order of preference for every (year, time chunk, brick):
+      1. the local input store (``inputs.InputStore``: compact int16 NetCDF in the workspace);
+      2. S3 through ``AORCDataLoader`` -- and the downloaded chunk is then written to the input
+         store (``keep_inputs``) or, if that is off, to the temporary brick cache.
+    With ``offline=True`` step 2 is skipped and a missing chunk raises ``OfflineMissing``.
+    The source name stays "aorc-s3" either way, so results are shared between online and offline use."""
 
     name = "aorc-s3"
     description = ("NOAA AORC v1.1 Zarr stores (s3://noaa-nws-aorc-v1-1-1km/{year}.zarr), "
-                   "fetched one 144 h x 128 x 256 chunk at a time, clipped to the study area, cached on disk.")
+                   "fetched one 144 h x 128 x 256 chunk at a time, clipped to the study area, kept in the local input store.")
 
-    def __init__(self, cache_dir="data/cache/bricks", max_gb=8.0, loader=None):
+    def __init__(self, cache_dir="data/cache/bricks", max_gb=8.0, loader=None, inputs=None, keep_inputs=True, offline=False):
         super().__init__()
-        from aorc_tools.aorc_access import AORCDataLoader
-        self.loader = loader or AORCDataLoader()
+        self._loader = loader
         self.cache = BrickCache(cache_dir, max_gb)
+        self.inputs = inputs
+        self.keep_inputs = keep_inputs
+        self.offline = offline
         self._origin: dict = {}
+
+    @property
+    def loader(self):
+        if self._loader is None:
+            from aorc_tools.aorc_access import AORCDataLoader
+            self._loader = AORCDataLoader()
+        return self._loader
 
     def origin_of_year(self, year):
         if year not in self._origin:
+            if self.offline:
+                return datetime(1979, 2, 1) if year == 1979 else datetime(year, 1, 1)
             ds = self.loader._open_dataset(year)
             self._origin[year] = pd.Timestamp(ds.time.values[0]).to_pydatetime()
         return self._origin[year]
@@ -368,17 +394,27 @@ class AORCSource(BaseSource):
     def status(self):
         s = super().status()
         s["cache"] = self.cache.usage()
+        s["mode"] = "offline (local input store only)" if self.offline else "online (S3 + local input store)"
+        s["offline"] = self.offline
         return s
 
     def _raw_brick_chunk(self, grid: Grid, year: int, k: int, brick: Brick):
+        sub = grid.points[(grid.points.ci == brick.ci) & (grid.points.cj == brick.cj)]
+        la0, la1 = int(sub.lat_idx.min()), int(sub.lat_idx.max()) + 1
+        lo0, lo1 = int(sub.lon_idx.min()), int(sub.lon_idx.max()) + 1
+        if self.inputs is not None:
+            got = self.inputs.read_brick_chunk(year, k, brick.key, (la0, la1), (lo0, lo1))
+            if got is not None:
+                arrays, times, meta = got
+                return arrays, times, meta, True
         cached = self.cache.get(year, k, brick)
         if cached is not None:
             arrays, times, meta = cached
             return arrays, times, meta, True
+        if self.offline:
+            raise OfflineMissing(f"AORC {year} chunk {k} brick {brick.key} is not in the local input store "
+                                 "(offline mode). Connect to the internet or download that period first (Data tab).")
         ds = self.loader._open_dataset(year)
-        sub = grid.points[(grid.points.ci == brick.ci) & (grid.points.cj == brick.cj)]
-        la0, la1 = int(sub.lat_idx.min()), int(sub.lat_idx.max()) + 1
-        lo0, lo1 = int(sub.lon_idx.min()), int(sub.lon_idx.max()) + 1
         t_idx0 = k * CHUNK_TIME
         t_idx1 = min(t_idx0 + CHUNK_TIME, ds.sizes["time"])
         lat_live = float(ds.latitude.values[la0]); lon_live = float(ds.longitude.values[lo0])
@@ -396,7 +432,14 @@ class AORCSource(BaseSource):
                 "seconds": round(_time.perf_counter() - t0, 2), "store": f"s3://{self.loader.BUCKET}/{year}.zarr"}
         logger.info("fetched %d/k%03d brick %s (%d x %d x %d) in %.1fs",
                     year, k, brick.key, len(times), la1 - la0, lo1 - lo0, meta["seconds"])
-        self.cache.put(year, k, brick, arrays, times, meta)
+        if self.inputs is not None and self.keep_inputs:
+            self.inputs.write_brick_chunk(year, k, brick.key, arrays, times, meta)
+            # hand back exactly what the store holds, so online and offline runs give identical results
+            got = self.inputs.read_brick_chunk(year, k, brick.key, (la0, la1), (lo0, lo1))
+            arrays, times = got[0], got[1]
+            meta = {**meta, "local_store": got[2].get("local_store")}
+        else:
+            self.cache.put(year, k, brick, arrays, times, meta)
         return arrays, times, meta, False
 
 

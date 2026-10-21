@@ -37,9 +37,15 @@ cd website && python -m http.server 8000
 # WUP Grid Explorer: map, hourly FWI2025 + daily FWI, FPI, ERC, BI for any cell and hours,
 # every step traced, results saved, known-fire checks. Double-click WUP_Explorer.bat
 # (or WUP_Explorer.exe from the "Build WUP Explorer" GitHub Action), or:
-python -m aorc_tools.explorer                 # real AORC if reachable, otherwise demo weather
+python -m aorc_tools.explorer                 # real AORC if reachable, local store offline, otherwise demo weather
 python -m aorc_tools.explorer --fire-checks   # headless: compute fire seasons, check known fires, write reports
+python -m aorc_tools.explorer --full-record   # headless: NDVI if missing -> whole record (resumable) -> full verification
+python -m aorc_tools.explorer --bundle D:/WUP_FDI_bundle.zip   # one zip: program + inputs + NDVI + results + manifest
 ```
+
+The explorer's **Data** tab covers the AORC input store (offline use), NDVI ingest (Planetary Computer,
+AppEEARS, NOAA CDR, local rasters), climate-model datasets (GLARM/RegCM, CMIP/CORDEX, WRF, ERA5), record
+verification and research bundles. Future-climate plan: `docs/future_glarm_plan.md`.
 
 See **[USAGE.md](USAGE.md)** for the complete user guide.
 
@@ -49,6 +55,8 @@ See **[USAGE.md](USAGE.md)** for the complete user guide.
 aorc_tools/              # Python package — fire index calculations
   fire_indices/          # FWI, ERC/BI, FPI implementations
   explorer/              # WUP Grid Explorer: chain, results store, jobs, fire checks, Flask API + static app
+                         #   inputs.py (AORC input store), ndvi_ingest.py, datasets.py (climate models),
+                         #   verify.py (record verifier), bundle.py (research bundle), tasks.py (data tasks)
   cli.py                 # Command-line interface
   extract.py             # Hourly extraction pipeline
   config.py              # AORC constants, NFDRS fuel models (A-Z)
@@ -63,8 +71,9 @@ scripts/
   compare_with_nfdrs4.py            # ERC/BI vs USFS NFDRS4
 docs/validation/         # results of those comparisons
 docs/existing_tools_comparison.md   # gridMET, CEMS/GEFF, NFDRS4, FWI2025, USGS FPI, Argonne
+docs/future_glarm_plan.md           # GLARM futures, bias correction, Argonne-informed weighting (after the gate)
 packaging/               # PyInstaller spec for the one-file WUP_Explorer executable
-WUP_Explorer.bat / .command, wup_explorer.sh, Run_Fire_Checks.bat   # double-click launchers
+WUP_Explorer.bat / .command, wup_explorer.sh, Run_Fire_Checks.bat, Run_Full_Record.bat   # double-click launchers
 data/
   shapefiles/            # Study area boundary (includes Isle Royale)
   output/                # Extracted CSV results (git-ignored)
@@ -85,3 +94,6 @@ tests/                   # Validation against Argonne & cffdrs-ng
 - Van Wagner & Pickett 1985: Canadian FWI System
 - Bradshaw et al. 1984: NFDRS fuel models (USFS INT-169)
 - Burgan et al. 1998: Fire Potential Index
+- Yu, Feng, Wang & Wright 2023: Performance of fire danger indices and their utility in predicting future wildfire
+  danger over the CONUS (Earth's Future 11, e2023EF003823)
+- Xue et al. 2022: GLARM climate projections over the Great Lakes region (GMD 15, 4425-4446)

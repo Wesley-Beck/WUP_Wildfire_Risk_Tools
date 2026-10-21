@@ -248,7 +248,7 @@ class ResultsStore:
     def _tier_var(self, ds, v, nt, chunk_t=24):
         ln = {"wx_tier": "weather input resolution tier (worst input): 0 native cell-hour, 1 time-interpolated <=3 h, "
                          "2 3x3 neighbourhood, 3 7x7 neighbourhood, 4 brick mean, 9 unavailable",
-              "ndvi_tier": "NDVI resolution tier: 0 MOD13Q1 250 m, 1 MOD13A1 500 m, 2 MOD13A2 1 km, 3 day-of-year climatology, 9 none"}[v]
+              "ndvi_tier": "NDVI resolution tier: 0 MOD13Q1 250 m, 1 MOD13A1 500 m, 2 MOD13A2 1 km, 3 AVHRR CDR ~5 km (opt-in), 4 day-of-year climatology (opt-in), 9 none"}[v]
         var = ds.createVariable(v, "u1", ("time", "latitude", "longitude"), fill_value=FILL_U1,
                                 chunksizes=(min(chunk_t, max(nt, 1)), min(64, self.ny), min(64, self.nx)), **COMP)
         var.long_name, var.grid_mapping = ln, "crs"

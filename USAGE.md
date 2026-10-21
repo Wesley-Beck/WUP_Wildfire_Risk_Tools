@@ -513,6 +513,76 @@ WUP_Explorer.exe --fire-checks --fires pinery-2009,summit-lake-2024
 These are case checks, not a skill score: one fire on one day says little on its own. A skill test needs
 every day with and without fires, which is the companion paper.
 
+### Data tab: inputs, offline use, climate datasets, verification, research bundle
+
+Click the source badge (top bar) or the **Data** tab.
+
+- **Weather source.**
+  - Choose AORC (S3), synthetic demo weather, or any registered climate dataset.
+  - **Offline** reads AORC only from the local input store, with no internet. Hours the store does not have
+    are reported, not invented.
+  - With `--source auto` the explorer starts offline by itself when S3 is unreachable but a local store exists.
+- **AORC input store** (`WUP_Explorer_data/inputs/aorc`).
+  - Every AORC hour downloaded while computing is kept, as int16 + zlib NetCDF per 144 h chunk, study cells
+    plus a 3-cell ring.
+  - **Download** fills a period for all bricks ahead of time. It skips what is there and can be resumed.
+  - The whole 1979–2026 WUP record is roughly 60–130 GB; the tab shows the measured size and an estimate.
+- **NDVI for FPI** (`WUP_Explorer_data/inputs/static`). **Build NDVI inputs** downloads 16-day composites,
+  screens them with MODIS pixel reliability (0/1 kept), averages them into the 800 m cells, interpolates to
+  daily and rebuilds the ND_min/ND_max envelope (`FPI_Input_Static.nc`). Sources:
+
+  | Source | What | Login |
+  |---|---|---|
+  | Microsoft Planetary Computer | MOD13Q1 (250 m) or MOD13A1 (500 m) | none |
+  | NASA AppEEARS | MOD13Q1/A1/A2 | Earthdata; the password is held in memory for that task only, or set `EARTHDATA_USERNAME` / `EARTHDATA_PASSWORD` |
+  | NOAA AVHRR CDR | 5 km, 1981 onward; used only by configurations that tick "allow non-MODIS NDVI" | none |
+  | Local folder | GeoTIFF or NetCDF composites you already have | none |
+- **Climate datasets.**
+  - **Add a dataset** registers model or reanalysis files (paths, globs or URLs) with a preset: `regcm`
+    (GLARM), `cf` (CMIP/CORDEX), `wrf`, `era5` or `aorc`.
+  - The files are regridded to the 800 m cells (bilinear, or inverse-distance for curvilinear model grids)
+    and run through the same four FDIs.
+  - Results are saved under their own source name, apart from the AORC record.
+  - Time steps coarser than 6 h are flagged, because the diurnal cycle would be missing.
+  - See `docs/future_glarm_plan.md`.
+- **Verify the saved record.** Quick (catalog + one file per year) or full (every file). Each check is PASS,
+  WARN or FAIL, per year, with an HTML/JSON report in `exports/`:
+  - completeness of every year × chunk × brick;
+  - moisture-code continuity across chunks (each chunk's start state equals the previous end state);
+  - value ranges, and ERC/BI not clipped;
+  - no uniform fields;
+  - daily FWI changes only at 12:00 LST;
+  - FPI only in the MODIS era;
+  - NaN only where the weather tier is 9;
+  - FWI/ERC/BI coverage, and FPI coverage in April–October of the MODIS era (it needs NDVI; winter gaps
+    under snow are expected).
+- **Research bundle.** One zip with:
+  - a README;
+  - `MANIFEST.json`: SHA-256 of every file plus provenance (configurations, domain, input coverage, NDVI
+    products, latest verification, citations);
+  - the program (`WUP_Explorer.exe` when packaged, plus a source snapshot with launchers);
+  - the workspace: results, AORC input store, NDVI inputs, catalog, fire checks, reports.
+
+  Tick parts off to make it smaller. Unzip anywhere and start it: the catalog re-points itself to the new
+  folder. `python -m aorc_tools.explorer.bundle check <zip>` re-hashes every file.
+
+### The whole record without the browser
+
+Every step skips what is already done, so the same command resumes after an interruption:
+
+```bat
+WUP_Explorer.exe --full-record                    :: NDVI (if missing) -> compute 1979->domain end, all bricks -> full verification
+WUP_Explorer.exe --download-aorc 1979-02-01 2026-09-30   :: fill the local AORC store only
+WUP_Explorer.exe --ingest-ndvi 2000-2026          :: NDVI inputs (--ndvi-backend planetary|appeears|cdr|local)
+WUP_Explorer.exe --compute 2009-04-01 2009-10-31  :: one period, all bricks
+WUP_Explorer.exe --verify full                    :: report in WUP_Explorer_data/exports/verify_*.html
+WUP_Explorer.exe --bundle D:\WUP_FDI_bundle.zip   :: research bundle (--bundle-parts app,results,inputs_aorc,ndvi,catalog)
+WUP_Explorer.exe --offline ...                    :: any of the above from the local AORC store only
+```
+
+`Run_Full_Record.bat` runs `--full-record` with the bundled defaults. The exit code is 0 when verification
+passes or warns, and 2 when it fails.
+
 ### Results files
 
 - One NetCDF4 (CF-1.8) file per 144 h time chunk covering the whole WUP rectangle:
@@ -528,6 +598,7 @@ every day with and without fires, which is the companion paper.
 
 See `docs/validation/README.md` (reproducible with `scripts/compare_*.py`) and
 `docs/existing_tools_comparison.md`. Both are also summarised in the explorer's *Data flow* tab.
+Future-climate plan (GLARM, Argonne-informed weighting): `docs/future_glarm_plan.md`.
 
 ---
 

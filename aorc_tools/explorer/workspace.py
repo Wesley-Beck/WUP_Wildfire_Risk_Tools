@@ -52,6 +52,10 @@ DEFAULT_SETTINGS = {
     "job_spinup_hours": 720,
     "cache_max_gb": 8.0,
     "source": None,
+    "keep_inputs": True,          # keep every downloaded AORC chunk in inputs/aorc (offline use, bundles)
+    "download_workers": 3,
+    "offline": False,             # read AORC only from the local input store
+    "workspace_root": None,       # where the catalog paths point (rewritten when the folder moves)
 }
 
 
@@ -99,6 +103,16 @@ def safe_name(s: str, default="item") -> str:
     return s or default
 
 
+def rebase_path(p: str, old_root: str, new_root: Path) -> str:
+    """``old_root/a/b.nc`` -> ``new_root/a/b.nc`` whatever separators either side used."""
+    norm = lambda x: x.replace("\\", "/").rstrip("/")  # noqa: E731
+    pp, oo = norm(str(p)), norm(str(old_root))
+    if pp == oo or pp.startswith(oo + "/"):
+        rel = [x for x in pp[len(oo):].split("/") if x]
+        return str(Path(new_root).joinpath(*rel))
+    return str(p)
+
+
 class Workspace:
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
@@ -112,9 +126,35 @@ class Workspace:
             if "path" not in cols:                       # workspaces created by an earlier build
                 c.execute("ALTER TABLE chunks ADD COLUMN path TEXT")
         self.settings = self._load_settings()
+        self.relocated = self._relocate()
         readme = self.root / "results" / "README.txt"
         if not readme.exists():
             readme.write_text(RESULTS_README)
+
+    # ------------------------------------------------------------------
+    PATH_TABLES = (("chunks", "path"), ("input_chunks", "path"), ("exports", "path"))
+
+    def _relocate(self) -> int:
+        """The catalog stores absolute file paths. When the workspace folder was moved, copied, or unzipped
+        from a research bundle (possibly made on another OS), rewrite them to this location."""
+        old = self.settings.get("workspace_root")
+        here = str(self.root)
+        n = 0
+        if old and old != here:
+            with self.conn() as c:
+                have = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                for table, col in self.PATH_TABLES:
+                    if table not in have:
+                        continue
+                    rows = c.execute(f"SELECT rowid, {col} FROM {table} WHERE {col} IS NOT NULL").fetchall()
+                    for rid, p in rows:
+                        newp = rebase_path(p, old, self.root)
+                        if newp != p:
+                            c.execute(f"UPDATE {table} SET {col}=? WHERE rowid=?", (newp, rid))
+                            n += 1
+        if old != here:
+            self.save_settings(workspace_root=here)
+        return n
 
     # ------------------------------------------------------------------
     def conn(self):

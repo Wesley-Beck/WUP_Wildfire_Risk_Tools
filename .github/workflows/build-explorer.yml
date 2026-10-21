@@ -31,7 +31,7 @@ jobs:
       - name: Unit tests (explorer)
         run: |
           pip install pytest
-          python -m pytest tests/test_explorer.py -q
+          python -m pytest tests/test_explorer.py tests/test_data_pipeline.py -q
       - name: Build
         run: pyinstaller --noconfirm --clean packaging/wup_explorer.spec
       - name: Smoke test the executable
@@ -44,7 +44,13 @@ jobs:
                -d '{"point_ids":[18685],"start":"2009-05-13T00","hours":24,"spinup_hours":24,"mode":"live"}' \
                http://127.0.0.1:8799/api/series > /dev/null
           curl -sf -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8799/api/fires/pinery-2009/check > /dev/null
+          curl -sf http://127.0.0.1:8799/api/data > /dev/null
+          curl -sf http://127.0.0.1:8799/api/bundle/plan > /dev/null
           curl -s -X POST http://127.0.0.1:8799/api/shutdown || true
+          sleep 3
+          ./dist/WUP_Explorer --source synthetic --workspace smoke_ws --bundle smoke_bundle.zip --bundle-parts app,catalog
+          python -m aorc_tools.explorer.bundle check smoke_bundle.zip
+          python -c "import zipfile,sys; n=zipfile.ZipFile('smoke_bundle.zip').namelist(); sys.exit(0 if any(x.endswith('app/aorc_tools/explorer/verify.py') for x in n) else 1)"
       - uses: actions/upload-artifact@v4
         with:
           name: WUP_Explorer-${{ runner.os }}

@@ -44,12 +44,15 @@ from aorc_tools.explorer.chain import FDIS, PRESETS, ChainConfig, run_chain
 from aorc_tools.explorer.climatology import Climatology
 from aorc_tools.explorer.extracted import ExtractedStore
 from aorc_tools.explorer import fires as firemod
+from aorc_tools.explorer.inputs import InputStore
+from aorc_tools.explorer.datasets import PRESET_HINTS, DatasetRegistry, DatasetSource
+from aorc_tools.explorer.tasks import TaskRunner
 from aorc_tools.explorer.geo import load_geojson
-from aorc_tools.explorer.grid import Grid, load_grid
+from aorc_tools.explorer.grid import Brick, Grid, load_grid
 from aorc_tools.explorer.jobs import JobRunner
 from aorc_tools.explorer.ndvi import FuelMap, NDVIProvider, SyntheticNDVI
 from aorc_tools.explorer.pipeline import catalog_payload, series_payload, trace_payload
-from aorc_tools.explorer.sources import AORCSource, SyntheticSource
+from aorc_tools.explorer.sources import AORCSource, OfflineMissing, SyntheticSource
 from aorc_tools.explorer.store import NC_LOCK, PACK, SAVED, STORED, ResultsStore
 from aorc_tools.explorer.workspace import Workspace
 
@@ -80,6 +83,15 @@ class Context:
         self.fuel_map = FuelMap(static_dir)
         self._clims = {}
         self.reachable = {}
+        self.inputs = InputStore(ws, grid)
+        self.offline = bool(ws.settings.get("offline", False))
+        self.datasets = DatasetRegistry(ws)
+
+    def sources_available(self):
+        out = dict(SOURCES)
+        for d in self.datasets.list():
+            out[f"ds-{d['slug']}"] = d["name"] + (f" ({d['scenario']})" if d.get("scenario") else "")
+        return out
 
     def source_for(self, name):
         name = "aorc-s3" if name in ("aorc", "s3") else name
@@ -87,10 +99,17 @@ class Context:
             if name not in self._sources:
                 if name == "synthetic":
                     self._sources[name] = SyntheticSource()
+                elif name.startswith("ds-"):
+                    cfg = self.datasets.get(name[3:])
+                    if cfg is None:
+                        raise ValueError(f"unknown dataset {name}")
+                    self._sources[name] = DatasetSource(cfg)
                 elif name == "aorc-s3":
                     self._sources[name] = AORCSource(cache_dir=self.ws.brick_cache_dir,
                                                      max_gb=float(self.ws.settings.get("cache_max_gb", 8.0)),
-                                                     loader=self.loader)
+                                                     loader=self.loader, inputs=self.inputs,
+                                                     keep_inputs=bool(self.ws.settings.get("keep_inputs", True)),
+                                                     offline=self.offline)
                 else:
                     raise ValueError(f"unknown source {name}")
             return self._sources[name]
@@ -98,6 +117,20 @@ class Context:
     @property
     def source(self):
         return self.source_for(self.active)
+
+    def set_offline(self, offline: bool):
+        self.offline = bool(offline)
+        with self._lock:
+            if "aorc-s3" in self._sources:
+                self._sources["aorc-s3"].offline = self.offline
+        self.ws.save_settings(offline=self.offline)
+
+    def download_source(self):
+        """An online AORC source writing into the input store (for bulk downloads, whatever the active mode)."""
+        if not hasattr(self, "_dl"):
+            self._dl = AORCSource(cache_dir=self.ws.brick_cache_dir, loader=self.loader, inputs=self.inputs,
+                                  keep_inputs=True, offline=False)
+        return self._dl
 
     def ndvi_for(self, cfg: ChainConfig, source_name=None):
         if (source_name or self.active) == "synthetic":
@@ -116,6 +149,20 @@ class Context:
         return self._clims[key]
 
 
+def _human_bytes(n):
+    for u in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or u == "TB":
+            return f"{n:.1f} {u}"
+        n /= 1024
+
+
+def _probe_chunk(src):
+    """(year, k) of the first 144-h chunk a source has data for."""
+    d0, _ = src.domain({})
+    ch = Grid.time_chunks(d0, d0, src.origin_of_year)[0]
+    return ch["year"], ch["k"]
+
+
 def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedStore | None = None,
                max_cells: int = 12000, max_hours: int = 24 * 92, per_cell_limit: int = 1024,
                start_jobs: bool = True) -> Flask:
@@ -125,10 +172,17 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
     jobs = JobRunner(ws, store, grid, ctx)
     extracted = extracted or ExtractedStore("data/output")
     fire_catalog = firemod.FireCatalog(ws, grid)
-    app.extensions["wup"] = {"ws": ws, "grid": grid, "ctx": ctx, "store": store, "jobs": jobs, "fires": fire_catalog}
+    tasks = TaskRunner(ws, grid, ctx)
+    app.extensions["wup"] = {"ws": ws, "grid": grid, "ctx": ctx, "store": store, "jobs": jobs, "fires": fire_catalog,
+                             "tasks": tasks}
     live_lock = threading.Semaphore(2)
     if start_jobs:
         jobs.start()
+        tasks.start()
+
+    @app.errorhandler(OfflineMissing)
+    def offline_missing(e):
+        return jsonify({"error": str(e), "offline_missing": True}), 409
 
     @app.after_request
     def cors(resp):
@@ -204,12 +258,12 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
     def status():
         cfg = PRESETS["hourly-default"]
         src = ctx.source
-        cov = store.coverage(src.name, cfg.id, ws.settings["domain_start"], ws.settings["domain_end"])
+        cov = store.coverage(src.name, cfg.id, *src.domain(ws.settings))
         clim = ctx.climatology(src.name, cfg.id)
         ndvi = ctx.ndvi_for(cfg)
         return jsonify({
             "version": PKG_VERSION, "workspace": str(ws.root), "settings": ws.settings,
-            "source": {**src.status(), "active": ctx.active, "available": SOURCES,
+            "source": {**src.status(), "active": ctx.active, "available": ctx.sources_available(),
                        "reachable": ctx.reachable.get(ctx.active)},
             "synthetic": src.name == "synthetic",
             "default_config": {**cfg.as_dict(), "id": cfg.id, "label": cfg.label()},
@@ -231,7 +285,8 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
     @app.post("/api/settings")
     def settings():
         b = body()
-        allowed = {k: b[k] for k in ("workers", "auto_resume", "domain_end", "job_spinup_hours", "cache_max_gb") if k in b}
+        allowed = {k: b[k] for k in ("workers", "auto_resume", "domain_end", "job_spinup_hours", "cache_max_gb",
+                                     "keep_inputs", "download_workers") if k in b}
         try:
             if "domain_end" in allowed:
                 _t(allowed["domain_end"])
@@ -241,18 +296,22 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
 
     @app.post("/api/source")
     def set_source():
-        name = body().get("name", "synthetic")
-        name = "aorc-s3" if name in ("aorc", "s3") else name
-        if name not in SOURCES:
+        b = body()
+        name = b.get("name", "synthetic")
+        name = "aorc-s3" if name in ("aorc", "s3", "aorc-local") else name
+        avail = ctx.sources_available()
+        if name not in avail:
             return err(f"unknown source {name}")
+        if name == "aorc-s3" and "offline" in b:
+            ctx.set_offline(bool(b["offline"]))
         try:
             src = ctx.source_for(name)
-            if name == "aorc-s3":
+            if name == "aorc-s3" and not ctx.offline:
                 src.origin_of_year(_t(ws.settings["domain_end"]).year)   # opens the store: proves S3 is reachable
                 ctx.reachable[name] = True
         except Exception as e:
             ctx.reachable[name] = False
-            return err(f"cannot reach {SOURCES[name]}: {e}", 502)
+            return err(f"cannot reach {avail[name]}: {e}", 502)
         ctx.active = name
         return jsonify({"active": name})
 
@@ -494,7 +553,7 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
     def coverage():
         cfg = cfg_from_args()
         cid = request.args.get("config_id", cfg.id)
-        c = store.coverage(ctx.active, cid, ws.settings["domain_start"], ws.settings["domain_end"],
+        c = store.coverage(ctx.active, cid, *ctx.source.domain(ws.settings),
                            allow_ndvi_climatology=cfg.allow_ndvi_climatology)
         c["configs"] = store.configs(ctx.active)
         c["batch_months"] = extracted.rescan().months()
@@ -591,7 +650,7 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
         p = ws.export_path(eid)
         if p is None or not p.exists():
             abort(404)
-        return send_file(p, as_attachment=True, download_name=p.name)
+        return send_file(p, as_attachment=request.args.get("inline") != "1", download_name=p.name)
 
     @app.post("/api/export/netcdf")
     def export_netcdf():
@@ -673,6 +732,238 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
         out = store.build_climatology(ctx.active, cfg.id, ctx.clim_path(ctx.active, cfg.id), stride=int(b.get("stride", 4)))
         return jsonify({**{k: v for k, v in out.items() if k != "vars"}, "vars": {k: v["n"] for k, v in out["vars"].items()}})
 
+    # ------------------------------------------------------------------ data: inputs, downloads, tasks
+    def data_inventory():
+        st = ws.settings
+        return {"aorc": ctx.inputs.inventory(st.get("domain_start"), st.get("domain_end")),
+                "offline": ctx.offline, "keep_inputs": bool(st.get("keep_inputs", True)),
+                "ndvi": NDVIProvider(ctx.static_dir).describe(),
+                "static_dir": str(ctx.static_dir),
+                "tasks": tasks.list(20)}
+
+    @app.get("/api/data")
+    def data_get():
+        return jsonify(data_inventory())
+
+    @app.post("/api/data/aorc")
+    def data_aorc():
+        b = body()
+        try:
+            start, end = _t(b["start"]), _t(b["end"])
+            if end < start:
+                raise ValueError("end before start")
+            bricks = list(b.get("bricks") or [x["key"] for x in grid.bricks()])
+            tid = tasks.create("aorc-download", b.get("name") or f"AORC {start:%Y-%m-%d} → {end:%Y-%m-%d} ({len(bricks)} bricks)",
+                               {"start": start.isoformat(), "end": end.isoformat(), "bricks": bricks})
+        except (KeyError, ValueError) as e:
+            return err(str(e))
+        return jsonify(tasks.get(tid))
+
+    @app.post("/api/data/ndvi")
+    def data_ndvi():
+        b = body()
+        try:
+            backend = b.get("backend", "planetary")
+            product = b.get("product", "MOD13Q1")
+            yrs = b.get("years") or [2000, 2026]
+            years = list(range(int(yrs[0]), int(yrs[-1]) + 1)) if len(yrs) == 2 else [int(y) for y in yrs]
+            if backend not in ("planetary", "appeears", "cdr", "local"):
+                raise ValueError("backend must be planetary, appeears, cdr or local")
+            if backend == "local" and not b.get("folder"):
+                raise ValueError("local backend needs a folder")
+            params = {"backend": backend, "product": product, "years": years, "folder": b.get("folder")}
+            tid = tasks.create("ndvi-ingest", b.get("name") or f"NDVI {product if backend != 'cdr' else 'AVHRR CDR'} "
+                                                                f"{years[0]}–{years[-1]} via {backend}", params)
+            if backend == "appeears" and b.get("username"):
+                tasks.secrets[tid] = {"username": b.get("username"), "password": b.get("password")}
+        except (KeyError, ValueError) as e:
+            return err(str(e))
+        return jsonify(tasks.get(tid))
+
+    @app.get("/api/datasets")
+    def datasets_list():
+        out = []
+        for d in ctx.datasets.list():
+            item = {**d, "source": f"ds-{d['slug']}"}
+            try:
+                item["status"] = ctx.source_for(item["source"]).status()
+            except Exception as e:
+                item["status"] = {"error": str(e)}
+            out.append(item)
+        return jsonify({"datasets": out, "presets": PRESET_HINTS})
+
+    @app.post("/api/datasets")
+    def datasets_save():
+        b = body()
+        try:
+            cfg = ctx.datasets.save(b)
+            name = f"ds-{cfg['slug']}"
+            with ctx._lock:
+                ctx._sources.pop(name, None)
+            st = ctx.source_for(name).status()            # probe: opens the files, finds variables and dates
+            if st.get("error"):
+                raise ValueError(st["error"])
+            probe = ctx.source_for(name)._raw_brick_chunk(grid, *_probe_chunk(ctx.source_for(name)),
+                                                                Brick(*map(int, max(grid.bricks(), key=lambda x: x["n_cells"])["key"].split("_")))) \
+                if b.get("probe", True) else None
+        except Exception as e:
+            return err(f"dataset not usable: {e}")
+        meta = probe[2] if probe else {}
+        found = meta.get("variables", {})
+        missing = [v for v in ("TMP_2maboveground", "SPFH_2maboveground", "PRES_surface", "APCP_surface") if v not in found]
+        if "UGRD_10maboveground" not in found and "_wind_speed" not in found:
+            missing.append("10 m wind")
+        return jsonify({"dataset": cfg, "source": name, "status": st, "variables_found": found, "missing": missing,
+                        "model_resolution_km": meta.get("model_resolution_km")})
+
+    def _dataset_localize_task(tid, params, progress):
+        slug = params["slug"]
+        src = ctx.source_for(f"ds-{slug}")
+        files = src.localize(ctx.datasets.local_dir(slug), grid.bbox, progress=progress)
+        ctx.datasets.set_local(slug, files)
+        with ctx._lock:
+            ctx._sources.pop(f"ds-{slug}", None)               # reopen from the local copy
+        st = ctx.source_for(f"ds-{slug}").status()
+        return {"files": len(files), "bytes": int(sum(Path(f).stat().st_size for f in files)),
+                "dir": str(ctx.datasets.local_dir(slug)), "start": st.get("start"), "end": st.get("end")}
+
+    tasks.register("dataset-localize", _dataset_localize_task)
+
+    @app.post("/api/datasets/<slug>/localize")
+    def datasets_localize(slug):
+        if ctx.datasets.get(slug) is None:
+            return err("unknown dataset", 404)
+        tid = tasks.create("dataset-localize", f"Offline copy of {ctx.datasets.get(slug)['name']}", {"slug": slug})
+        if body().get("wait"):
+            tasks.run_now(tid)
+        return jsonify(tasks.get(tid))
+
+    @app.delete("/api/datasets/<slug>")
+    def datasets_delete(slug):
+        ctx.datasets.delete(slug)
+        with ctx._lock:
+            ctx._sources.pop(f"ds-{slug}", None)
+        if ctx.active == f"ds-{slug}":
+            ctx.active = "synthetic"
+        return jsonify({"deleted": slug})
+
+    # ------------------------------------------------------------------ verification of the saved record
+    def _verify_task(tid, params, progress):
+        from aorc_tools.explorer import verify as verifymod
+        src = ctx.source_for(params["source"])
+        cfg = ChainConfig.from_dict(params["config"])
+        rep_ = verifymod.verify_record(store, grid, src, cfg, ws.settings, mode=params.get("mode", "quick"),
+                                       progress=progress, years=params.get("years"), bricks=params.get("bricks"))
+        paths = verifymod.save_report(ws, rep_)
+        eid = ws.register_export(paths["html"], "verify-report", f"{rep_['overall']} {src.name} {cfg.id} {rep_['mode']}")
+        ws.register_export(paths["json"], "verify-json", f"{rep_['overall']} {src.name} {cfg.id} {rep_['mode']}")
+        return {"overall": rep_["overall"], "checks": {k: v["status"] for k, v in rep_["checks"].items()},
+                "completeness_percent": rep_["checks"]["completeness"]["percent"], "files_checked": rep_["files_checked"],
+                "problems": rep_["problems"][:20], "report_export_id": eid, **paths}
+
+    tasks.register("verify", _verify_task)
+
+    @app.post("/api/data/verify")
+    def data_verify():
+        b = body()
+        try:
+            cfg = cfg_from(b)
+            source = b.get("source") or ctx.active
+            ctx.source_for(source)
+            mode = b.get("mode", "quick")
+            if mode not in ("quick", "full"):
+                raise ValueError("mode must be quick or full")
+            yrs = b.get("years")
+            years = (list(range(int(yrs[0]), int(yrs[-1]) + 1)) if len(yrs) == 2 else [int(y) for y in yrs]) if yrs else None
+            tid = tasks.create("verify", b.get("name") or f"Verify {source} {cfg.id} ({mode})",
+                               {"source": source, "config": cfg.as_dict(), "mode": mode, "years": years,
+                                "bricks": b.get("bricks")})
+        except (KeyError, ValueError) as e:
+            return err(str(e))
+        if b.get("wait"):
+            tasks.run_now(tid)
+        return jsonify(tasks.get(tid))
+
+    # ------------------------------------------------------------------ research bundle
+    def _bundle_task(tid, params, progress):
+        from aorc_tools.explorer import bundle as bundlemod
+        out = Path(params["path"])
+        r = bundlemod.make(ws, ctx, store, grid, out, parts=params.get("parts"), results_filter=params.get("results"),
+                           progress=progress)
+        r["export_id"] = ws.register_export(out, "bundle", f"research bundle {_human_bytes(r['bytes'])}")
+        return r
+
+    def _bundle_check_task(tid, params, progress):
+        from aorc_tools.explorer import bundle as bundlemod
+        r = bundlemod.check(Path(params["path"]), progress=progress)
+        return {k: v for k, v in r.items() if k != "provenance"} | {"errors": r["bad"] + r["missing"]}
+
+    tasks.register("bundle", _bundle_task)
+    tasks.register("bundle-check", _bundle_check_task)
+
+    @app.get("/api/bundle/plan")
+    def bundle_plan():
+        from aorc_tools.explorer import bundle as bundlemod
+        parts = [p for p in request.args.get("parts", "").split(",") if p] or None
+        pl = bundlemod.plan(ws, ctx, parts)
+        return jsonify({"parts": pl["parts"], "total_bytes": pl["total_bytes"], "labels": bundlemod.PARTS,
+                        "default_path": str(ws.root.parent / f"WUP_FDI_bundle_{datetime.now():%Y%m%d}.zip"),
+                        "configs": store.configs()})
+
+    @app.post("/api/bundle")
+    def bundle_make():
+        from aorc_tools.explorer import bundle as bundlemod
+        b = body()
+        parts = [p for p in (b.get("parts") or list(bundlemod.PARTS)) if p in bundlemod.PARTS]
+        path = Path(b.get("path") or ws.root.parent / f"WUP_FDI_bundle_{datetime.now():%Y%m%d}.zip").expanduser()
+        if path.suffix.lower() != ".zip":
+            path = path.with_suffix(".zip")
+        try:
+            path.resolve().relative_to(ws.root.resolve())
+            if path.resolve().parent != (ws.root / "bundles").resolve():
+                return err("put the bundle outside the workspace folder (or in its bundles/ folder)")
+        except ValueError:
+            pass
+        tid = tasks.create("bundle", b.get("name") or f"Research bundle → {path.name}",
+                           {"path": str(path), "parts": parts, "results": b.get("results")})
+        if b.get("wait"):
+            tasks.run_now(tid)
+        return jsonify(tasks.get(tid))
+
+    @app.post("/api/bundle/check")
+    def bundle_check():
+        b = body()
+        if not b.get("path") or not Path(b["path"]).exists():
+            return err("no such file")
+        tid = tasks.create("bundle-check", f"Check {Path(b['path']).name}", {"path": b["path"]})
+        if b.get("wait"):
+            tasks.run_now(tid)
+        return jsonify(tasks.get(tid))
+
+    @app.post("/api/data/offline")
+    def data_offline():
+        ctx.set_offline(bool(body().get("offline", True)))
+        return jsonify({"offline": ctx.offline})
+
+    @app.get("/api/tasks")
+    def tasks_list():
+        return jsonify({"tasks": tasks.list(50)})
+
+    @app.post("/api/tasks/<int:tid>/<action>")
+    def tasks_action(tid, action):
+        if action not in ("cancel", "resume"):
+            return err("unknown action")
+        getattr(tasks, action)(tid)
+        return jsonify(tasks.get(tid) or {})
+
+    @app.delete("/api/tasks/<int:tid>")
+    def tasks_delete(tid):
+        try:
+            tasks.delete(tid)
+        except ValueError as e:
+            return err(str(e))
+        return jsonify({"deleted": tid})
+
     # ------------------------------------------------------------------ known fires
     def fire_live(pids, start, end, spin, cfg):
         return live_result(pids, pd.Timestamp(start).to_pydatetime(), pd.Timestamp(end).to_pydatetime(), spin, cfg, mode="store")[1]
@@ -681,7 +972,7 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
         rep_ = firemod.check_fire(fire, grid=grid, store=store, source_name=ctx.active, cfg=cfg, live=fire_live,
                                   days_before=int(b.get("days_before", 14)), days_after=int(b.get("days_after", 3)),
                                   radius=b.get("radius"), spinup_hours=int(ws.settings.get("job_spinup_hours", 720)),
-                                  domain_end=ws.settings.get("domain_end"))
+                                  domain_end=ctx.source.domain(ws.settings)[1])
         if rep_.get("status") == "ok":
             d = ws.root / "fires" / "checks"
             d.mkdir(parents=True, exist_ok=True)
@@ -813,6 +1104,7 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
         if request.remote_addr not in ("127.0.0.1", "::1", None):
             abort(403)
         jobs.stop()
+        tasks.stop()
         threading.Timer(0.5, lambda: os._exit(0)).start()
         return jsonify({"bye": True})
 

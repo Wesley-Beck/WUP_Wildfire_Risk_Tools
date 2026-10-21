@@ -6,15 +6,17 @@ NDVI (per cell, per day; held constant across the 24 hours of the day):
     tier 0  MOD13Q1   250 m, 16-day composite, interpolated to daily, aggregated to the cell
     tier 1  MOD13A1   500 m, 16-day       (used where tier 0 is missing / QA-screened out)
     tier 2  MOD13A2   1 km, 16-day
-    tier 3  per-cell day-of-year NDVI climatology (2000–2026)   -- OPT-IN ONLY: outside the
-            locked "FPI = MODIS era 2000–2026" decision (CLAUDE.md, Option 1)
-    tier 9  none      -> FPI is NaN (always the case before 2000-02-18 unless tier 3 is enabled)
+    tier 3  NOAA CDR AVHRR/VIIRS NDVI, 0.05 deg (~5 km), 16-day max composite  -- OPT-IN ONLY
+    tier 4  per-cell day-of-year NDVI climatology (2000–2026)                  -- OPT-IN ONLY
+            (tiers 3-4 are outside the locked "FPI = MODIS era 2000–2026" decision, CLAUDE.md Option 1)
+    tier 9  none      -> FPI is NaN (always the case before 2000-02-18 unless opt-in tiers are enabled)
 
 File layout (USAGE.md):
     data/static/FPI_Input_Static.nc                       ND_min, ND_max, LLfm, DLfm, MXd (lat, lon)
-    data/static/ndvi/<PRODUCT>/FPI_Input_<year>.nc        ND0 (time, lat, lon), daily
+    data/static/ndvi/<PRODUCT>/FPI_Input_<year>.nc        ND0 (time, lat, lon), daily  (PRODUCT: MOD13Q1, MOD13A1,
+                                                           MOD13A2, AVHRR_CDR -- written by explorer.ndvi_ingest)
     data/static/ndvi/FPI_Input_<year>.nc                  legacy single-product layout -> tier 0
-    data/static/ndvi/ndvi_doy_climatology.nc              ND_clim (doy, lat, lon), tier 3
+    data/static/ndvi/ndvi_doy_climatology.nc              ND_clim (doy, lat, lon), tier 4 (built by ndvi_ingest)
 
 Fuel model (per cell):
     tier 0  data/static/nfdrs_fuel_model.csv  (point_id, fuel_model)  e.g. derived from LANDFIRE
@@ -32,7 +34,8 @@ from aorc_tools.config import NFDRS_FUEL_MODELS
 
 MODIS_START = pd.Timestamp("2000-02-18")
 NDVI_PRODUCTS = [("MOD13Q1", 250), ("MOD13A1", 500), ("MOD13A2", 1000)]
-NDVI_TIERS = {0: "MOD13Q1 250 m", 1: "MOD13A1 500 m", 2: "MOD13A2 1 km", 3: "day-of-year climatology (opt-in)", 9: "none"}
+NDVI_TIERS = {0: "MOD13Q1 250 m", 1: "MOD13A1 500 m", 2: "MOD13A2 1 km", 3: "AVHRR CDR ~5 km (opt-in)",
+              4: "day-of-year climatology (opt-in)", 9: "none"}
 
 
 def fuel_loadings(models: np.ndarray) -> dict:
@@ -83,7 +86,7 @@ class NDVIProvider:
 
     def describe(self):
         prods = {p: sorted(x.stem.split("_")[-1] for x in (self.dir / "ndvi" / p).glob("FPI_Input_*.nc"))
-                 for p, _ in NDVI_PRODUCTS if (self.dir / "ndvi" / p).exists()}
+                 for p in [q for q, _ in NDVI_PRODUCTS] + ["AVHRR_CDR"] if (self.dir / "ndvi" / p).exists()}
         legacy = sorted(x.stem.split("_")[-1] for x in (self.dir / "ndvi").glob("FPI_Input_*.nc")) if (self.dir / "ndvi").exists() else []
         return {"kind": "files", "available": self.available, "static": str(self.static_path), "products": prods,
                 "legacy_years": legacy, "climatology": (self.dir / "ndvi" / "ndvi_doy_climatology.nc").exists(),
@@ -107,6 +110,8 @@ class NDVIProvider:
         nd_day = np.full((len(udays), len(rows)), np.nan)
         tier_day = np.full((len(udays), len(rows)), 9, dtype=np.uint8)
         candidates = [(i, self.dir / "ndvi" / p) for i, (p, _) in enumerate(NDVI_PRODUCTS)] + [(0, self.dir / "ndvi")]
+        if self.allow_climatology:                   # opt-in: AVHRR CDR (also before MODIS)
+            candidates.append((3, self.dir / "ndvi" / "AVHRR_CDR"))
         for year in sorted(set(udays.year)):
             ysel = udays.year == year
             for tier, folder in candidates:
@@ -116,7 +121,8 @@ class NDVIProvider:
                 ds = xr.open_dataset(f)
                 vals = self._pick(ds["ND0"].sel(time=udays[ysel], method="nearest"), lats, lons).values
                 blk = nd_day[ysel]
-                take = np.isnan(blk) & np.isfinite(vals) & (udays[ysel] >= MODIS_START)[:, None]
+                era_ok = (udays[ysel] >= MODIS_START) if tier < 3 else np.ones(int(ysel.sum()), dtype=bool)
+                take = np.isnan(blk) & np.isfinite(vals) & era_ok[:, None]
                 blk[take] = vals[take]
                 nd_day[ysel] = blk
                 tb = tier_day[ysel]; tb[take] = tier; tier_day[ysel] = tb
@@ -126,7 +132,7 @@ class NDVIProvider:
             vals = self._pick(ds["ND_clim"].sel(doy=xr.DataArray(udays.dayofyear.values, dims="t")), lats, lons).values
             take = np.isnan(nd_day) & np.isfinite(vals)
             nd_day[take] = vals[take]
-            tier_day[take] = 3
+            tier_day[take] = 4
         pos = udays.get_indexer(days)
         out["nd0"] = nd_day[pos]
         out["tier"] = tier_day[pos]
@@ -165,7 +171,7 @@ class SyntheticNDVI:
         tier = np.where(h < 6, 1, np.where(h < 8, 2, 0)).astype(np.uint8)
         pre = (times < MODIS_START)[:, None] & np.ones_like(tier, dtype=bool)
         if self.allow_climatology:
-            tier = np.where(pre, 3, tier).astype(np.uint8)
+            tier = np.where(pre, 4, tier).astype(np.uint8)
         else:
             nd0 = np.where(pre, np.nan, nd0)
             tier = np.where(pre, 9, tier).astype(np.uint8)

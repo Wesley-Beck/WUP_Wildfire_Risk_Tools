@@ -196,7 +196,9 @@
     S.status = await W.api('/api/status');
     const s = S.status, pill = $('srcpill');
     pill.className = 'pill ' + (s.synthetic ? 'synthetic' : 'aorc');
-    pill.innerHTML = s.synthetic ? 'synthetic demo data ▾' : 'AORC v1.1 · S3 ▾';
+    const act = s.source?.active || '';
+    pill.innerHTML = s.synthetic ? 'synthetic demo data ▾' : act.startsWith('ds-') ? `${W.esc(s.source.available?.[act] || act)} ▾`
+      : (s.settings?.offline ? 'AORC v1.1 · local store (offline) ▾' : 'AORC v1.1 · S3 ▾');
     $('banner').style.display = s.synthetic ? 'block' : 'none';
     $('banner').textContent = 'Demo mode: synthetic weather shaped like AORC — not real data. Click the source badge to switch to the real archive.';
     const c = s.coverage;
@@ -251,13 +253,7 @@
     $('b-quit').onclick = async () => { if (!confirm('Stop the explorer? Unfinished jobs continue next time it starts.')) return;
       try { await W.api('/api/shutdown', { method: 'POST' }); } catch { /* server gone */ }
       document.body.innerHTML = '<div style="padding:40px;font:16px system-ui;color:#eceae4">The explorer has stopped. Close this tab, and start it again with WUP_Explorer whenever you like — your workspace is kept.</div>'; };
-    $('srcpill').onclick = async () => {
-      const to = S.status.synthetic ? 'aorc-s3' : 'synthetic';
-      if (!confirm(to === 'synthetic' ? 'Switch to synthetic demo weather?' : 'Switch to the real NOAA AORC archive on S3? (needs internet)')) return;
-      W.status('switching source…', true);
-      try { await W.api('/api/source', { json: { name: to } }); await W.refreshStatus(); S.series = null; S.trace = null; W.renderTab(); W.status(`Source: ${to}`); W.onSelectionChanged(); }
-      catch (e) { W.status('Error: ' + W.esc(e.message)); }
-    };
+    $('srcpill').onclick = () => { S.tab = 'DATA'; W.renderTab(); };
     $('importfile').onchange = e => { if (e.target.files[0]) W.importFile(e.target.files[0]); e.target.value = ''; };
     $('savedsel').onchange = async e => { if (!e.target.value) return; const s = await W.api(`/api/selections/${e.target.value}`); W.setMode('cell'); W.selectMany(s.payload.point_ids, s.name); W.fitSelection(); e.target.value = ''; };
     const mapEl = $('map');

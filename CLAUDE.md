@@ -24,6 +24,14 @@ COMPANION papers. Deadline: July 1, 2026 (no resubmission).
   `WUP_Explorer.exe` from `.github/workflows/build-explorer.yml` + `packaging/wup_explorer.spec`): map selection,
   hourly chain with per-packet resolution tiers, NetCDF4 results store (int16+zlib, ~2 B/packet), resumable jobs,
   coverage %, save/share, known-fire checks (`fires.py`, Fires tab, `--fire-checks`). Tests: `tests/test_explorer.py`.
+  Data side (2026-10-21): AORC input store + offline mode (`inputs.py`, `inputs/aorc`), NDVI ingest (`ndvi_ingest.py`:
+  Planetary Computer / AppEEARS / NOAA CDR / local; QA 0/1; cell averaging; daily interp; envelope), climate-model
+  adapter (`datasets.py`: regcm=GLARM, cf, wrf, era5), full-record verifier (`verify.py`, `--verify`), research bundle
+  (`bundle.py`, `--bundle`; zip + SHA-256 manifest; workspace relocates itself), headless `--full-record`,
+  Data tab. Tests: `tests/test_data_pipeline.py`.
+- `docs/future_glarm_plan.md` — futures with GLARM (GATED on a full-record PASS). Key facts: public GLARM-Proj1 has
+  only daily lake temp/ice/T2m → need RegCM SRF fields from Xue's group; Yu et al. 2023 give NO weights (sensitivity,
+  skill, 5.2 projections only) → weights must be built (W1 equal/agreement, W2 Yu Fig. 3, W3 WUP's own skill).
 - `docs/validation/` + `scripts/compare_*.py` — this code vs official cffdrs-ng, xclim, NFDRS4 (see below).
   `docs/existing_tools_comparison.md` — gridMET, CEMS/GEFF, NFDRS4, FWI2025, USGS FPI, Argonne.
 - `data/points/` — AORC points CSV + shapefiles (committed; small)

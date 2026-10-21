@@ -31,6 +31,10 @@ setup(
         "tzdata>=2023.3",
         "openpyxl>=3.1",
     ],
+    extras_require={
+        "ingest": ["rasterio>=1.3", "pystac-client>=0.7", "planetary-computer>=1.0", "h5netcdf>=1.2", "h5py>=3.8",
+                   "requests>=2.28"],
+    },
     entry_points={
         "console_scripts": [
             "aorc-tools=aorc_tools.cli:main",

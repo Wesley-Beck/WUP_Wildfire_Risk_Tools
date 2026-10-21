@@ -46,7 +46,7 @@ RESOLUTION_MATRIX = [
      "effective": "exact (within ~2 min of astral)", "ladder": "—", "used_by": ["FWI"]},
     {"input": "NDVI (greenness)", "id": "NDVI", "grid": "cell / daily, held across the day's 24 h",
      "source": "MODIS MOD13Q1 250 m 16-day composite, aggregated to the cell and interpolated to daily", "effective": "250 m / 16-day",
-     "ladder": "MOD13Q1 250 m → MOD13A1 500 m → MOD13A2 1 km → (opt-in, outside the locked decision) day-of-year climatology → none. Nothing before 2000-02-18.",
+     "ladder": "MOD13Q1 250 m → MOD13A1 500 m → MOD13A2 1 km → (opt-in, outside the locked decision) AVHRR CDR ~5 km → day-of-year climatology → none. Nothing before 2000-02-18 unless opted in.",
      "used_by": ["FPI"]},
     {"input": "Fuel model", "id": "fuel_model", "grid": "per cell", "source": "data/static/nfdrs_fuel_model.csv (e.g. from LANDFIRE)",
      "effective": "cell when mapped", "ladder": "per-cell map → project default (G) everywhere", "used_by": ["ERC", "BI", "FPI"]},
@@ -88,10 +88,15 @@ KNOWN_ISSUES = [
     {"id": "derived", "status": "CAVEAT",
      "text": "ERC/BI use one NFDRS fuel model (unless a per-cell map is supplied) and constant live-fuel moisture; they are derived "
              "indices reported as percentiles."},
+    {"id": "futures", "status": "PLANNED (after the record verifies)",
+     "text": "Climate-model datasets (GLARM/RegCM, CMIP/CORDEX, WRF, ERA5) already run through the same four FDIs (Data tab), stored "
+             "apart from the AORC record. Not yet built: bias correction against AORC 2000–2019 (delta change / quantile delta "
+             "mapping), so FDIs from raw model weather carry the model's biases. The public GLARM-Proj1 files hold only daily lake "
+             "temperature, ice and 2 m air temperature; the FDIs need the RegCM surface fields. See docs/future_glarm_plan.md."},
 ]
 
 STAGES = [
-    {"id": "intake", "label": "1 · AORC intake", "note": "7 variables per packet, through the resolution ladder."},
+    {"id": "intake", "label": "1 · AORC intake", "note": "7 variables per packet, through the resolution ladder (S3, or the local input store offline; climate-model datasets are regridded to the same cells)."},
     {"id": "convert", "label": "2 · Unit conversion", "note": "Deterministic, stateless, per packet."},
     {"id": "time", "label": "3 · Time & sun", "note": "Per-cell sun position at the packet's UTC instant; county time zone for local-time views."},
     {"id": "cffwis", "label": "4a · CFFWIS (hourly + classic daily)", "note": "Carry-forward FFMC/DMC/DC moisture state; DMC/DC dry only in daylight. Classic daily FWI updated once per cell at 12:00 LST."},
@@ -151,7 +156,7 @@ STEP_CATALOG: list[dict] = [
     {"id": "SC", "stage": "nfdrs", "label": "Spread Component", "units": "ft/min", "formula": "Rothermel I_R·ξ·(1 + φs + φw)/heat sink", "ref": "nfdrs.compute_erc_bi", "inputs": ["FM1", "FM10", "FM100", "MC_HERB", "MC_WOOD", "wind_speed_mph"], "feeds": ["BI"]},
     {"id": "ERC", "stage": "nfdrs", "label": "Energy Release Component", "units": "BTU/ft²", "formula": "round(0.04·I_Re·τ)", "ref": "nfdrs.compute_erc_bi (derived; percentile)", "inputs": ["FM1", "FM10", "FM100", "FM1000", "MC_HERB", "MC_WOOD"], "feeds": ["ERC", "BI"], "fdi": True},
     {"id": "BI", "stage": "nfdrs", "label": "Burning Index", "units": "", "formula": "3.01·(SC·ERC)^0.46", "ref": "nfdrs.compute_erc_bi (derived; percentile)", "inputs": ["SC", "ERC"], "feeds": ["BI"], "fdi": True},
-    {"id": "ndvi_tier", "stage": "fpi", "label": "NDVI resolution tier", "units": "tier", "formula": "0 250 m · 1 500 m · 2 1 km · 3 climatology · 9 none", "ref": "explorer.ndvi", "feeds": ["FPI"]},
+    {"id": "ndvi_tier", "stage": "fpi", "label": "NDVI resolution tier", "units": "tier", "formula": "0 250 m · 1 500 m · 2 1 km · 3 AVHRR 5 km · 4 climatology · 9 none", "ref": "explorer.ndvi", "feeds": ["FPI"]},
     {"id": "NDVI", "stage": "fpi", "label": "NDVI (daily, held over the day)", "units": "", "formula": "MODIS 16-day composite → daily", "ref": "Burgan et al. 1998", "feeds": ["FPI"]},
     {"id": "ND_MIN", "stage": "fpi", "label": "NDVI minimum (cell)", "units": "", "formula": "static envelope", "ref": "FPI_Input_Static.nc", "feeds": ["FPI"]},
     {"id": "ND_MAX", "stage": "fpi", "label": "NDVI maximum (cell)", "units": "", "formula": "static envelope", "ref": "FPI_Input_Static.nc", "feeds": ["FPI"]},

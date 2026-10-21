@@ -15,7 +15,7 @@
       <h1>WUP Grid Explorer</h1>
       <div class="sub">AORC 800 m cells · hourly packets · FWI / FPI / ERC / BI · every step traced</div>
     </div>
-    <span class="pill" id="srcpill" title="Data source — click to switch">connecting…</span>
+    <span class="pill" id="srcpill" title="Data source — click for sources, inputs, verification and bundles">connecting…</span>
     <span class="pill" id="covpill" title="Share of all packets (cells × hours, 1979→) calculated and saved for the active configuration">—</span>
     <span class="pill" id="jobpill" title="Background calculation jobs" style="display:none"></span>
     <div class="hdr-right">
@@ -82,7 +82,7 @@
           <div class="row"><label for="c-coef">Hourly FWI</label><select id="c-coef"><option value="cffdrs-ng">cffdrs-ng / FWI2025 (official, verified)</option><option value="legacy">legacy port (old batch record)</option></select><span class="tag" title="cffdrs-ng mode reproduces NRCan's reference output exactly (docs/validation); the legacy port does not">verified</span></div>
           <div class="row"><label for="c-fpi">FPI moisture</label><select id="c-fpi"><option value="hourly">Hourly 10-h timelag</option><option value="daily-burgan">Daily Burgan (Tmax/RHmin)</option></select></div>
           <div class="row"><label class="chk"><input type="checkbox" id="c-gap" checked> fill gaps with the resolution ladder</label></div>
-          <div class="row"><label class="chk" title="Outside the locked FPI decision (MODIS era only)"><input type="checkbox" id="c-clim"> allow climatological NDVI (pre-2000 FPI)</label></div>
+          <div class="row"><label class="chk" title="Outside the locked FPI decision (MODIS era only): uses AVHRR CDR (5 km) or the MODIS day-of-year climatology where MODIS is missing"><input type="checkbox" id="c-clim"> allow non-MODIS NDVI (pre-2000 / future FPI)</label></div>
           <div class="row"><span class="hint">config <span class="mono" id="c-id"></span></span><button class="btn sm ghost" id="c-reset">project default</button><button class="btn sm ghost" id="c-legacy">legacy batch</button></div>
           <div class="seg" style="margin-top:8px">
             <button class="btn primary grow" id="b-show" title="Use saved results when they exist, otherwise compute live">Show</button>
@@ -133,6 +133,7 @@
         <div class="tab" data-tab="FIRE">Fires</div>
         <div class="tab" data-tab="COV">Coverage</div>
         <div class="tab" data-tab="JOBS">Jobs</div>
+        <div class="tab" data-tab="DATA">Data</div>
         <div class="tab" data-tab="LIB">Save &amp; share</div>
       </div>
       <div id="tabbody"></div>
@@ -150,6 +151,7 @@
 <script src="static/js/panels.js"></script>
 <script src="static/js/share.js"></script>
 <script src="static/js/fires.js"></script>
+<script src="static/js/data.js"></script>
 <script src="static/js/main.js"></script>
 </body>
 </html>

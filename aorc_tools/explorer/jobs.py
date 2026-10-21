@@ -60,8 +60,7 @@ class JobRunner:
 
     def create(self, name, source, cfg: ChainConfig, bricks, start, end, spinup_hours=None):
         cfg.validate()
-        de = pd.Timestamp(self.ws.settings["domain_end"]).to_pydatetime()
-        dsd = pd.Timestamp(self.ws.settings["domain_start"]).to_pydatetime()
+        dsd, de = self.ctx.source_for(source).domain(self.ws.settings)
         start, end = max(pd.Timestamp(start).to_pydatetime(), dsd), min(pd.Timestamp(end).to_pydatetime(), de)
         if end < start:
             raise ValueError("period is outside the data domain")
@@ -173,7 +172,7 @@ class JobRunner:
         source = job["source"]
         t0 = _time.perf_counter()
         start, end = pd.Timestamp(job["start"]).to_pydatetime(), pd.Timestamp(job["end"]).to_pydatetime()
-        chunks = self.chunks_for(source, start, end, self.ws.settings["domain_end"])
+        chunks = self.chunks_for(source, start, end, self.ctx.source_for(source).domain(self.ws.settings)[1])
         bricks = job["bricks"]
         pids = {b: np.array(self.grid.cells_in_brick(*map(int, b.split("_")))) for b in bricks}
         hours = lambda ch: int((ch["end"] - ch["start"]).total_seconds() // 3600) + 1  # noqa: E731
@@ -250,15 +249,15 @@ class JobRunner:
     def compute_brick_chunk(self, source, cfg, bkey, pids, ch, spinup_hours):
         src = self.ctx.source_for(source)
         py, pk = self.prev_chunk_key(source, ch)
-        prev_ok = ch["start"] > pd.Timestamp(self.ws.settings["domain_start"]).to_pydatetime() and \
+        dsd = src.domain(self.ws.settings)[0]
+        prev_ok = ch["start"] > dsd and \
             self.store.has_chunk(source, cfg.id, py, pk, bkey, need_end=ch["start"] - timedelta(hours=1))
         state = self.store.state_at(source, cfg.id, py, pk, bkey, "end", pids) if prev_ok else None
-        dsd = pd.Timestamp(self.ws.settings["domain_start"]).to_pydatetime()
         if state is not None:
             spin, continuity, w_start = 0, "continuous", ch["start"]
         else:
             w_start = max(dsd, ch["start"] - timedelta(hours=int(spinup_hours)))
-            spin = int((ch["start"] - w_start).total_seconds() // 3600)
+            spin = max(0, int((ch["start"] - w_start).total_seconds() // 3600))   # 0 when the domain starts inside this chunk
             continuity = f"spinup:{spin}h" if spin else "cold"
         tc = _time.perf_counter()
         raw = src.fetch(self.grid, pids, w_start, ch["end"], gap_fill=cfg.gap_fill)

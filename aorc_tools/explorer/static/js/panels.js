@@ -4,12 +4,12 @@
   const S = W.S;
   const body = () => $('tabbody');
   const TIER_LABEL = { 0: 'native', 1: 'time-interp', 2: '3×3', 3: '7×7', 4: 'brick', 9: 'none' };
-  const NDVI_LABEL = { 0: '250 m', 1: '500 m', 2: '1 km', 3: 'climatology', 9: 'none' };
+  const NDVI_LABEL = { 0: '250 m', 1: '500 m', 2: '1 km', 3: 'AVHRR 5 km', 4: 'climatology', 9: 'none' };
 
   W.renderTab = function () {
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === S.tab));
     const b = body(); b.innerHTML = '';
-    const f = { DAY: renderDaylight, FLOW: renderFlow, RES: renderResolution, COV: renderCoverage, JOBS: renderJobs, LIB: renderLibrary, FIRE: W.renderFires }[S.tab];
+    const f = { DAY: renderDaylight, FLOW: renderFlow, RES: renderResolution, COV: renderCoverage, JOBS: renderJobs, LIB: renderLibrary, FIRE: W.renderFires, DATA: W.renderData }[S.tab];
     if (f) return f(b);
     renderFDI(b, S.tab);
   };
