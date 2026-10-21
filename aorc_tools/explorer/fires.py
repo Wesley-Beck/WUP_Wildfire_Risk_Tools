@@ -464,6 +464,13 @@ def check_fire(fire, *, grid, store, source_name, cfg, live, days_before=14, day
         refs.append({**ref, "ours": got, "at": at, "diff": round(diff, 2),
                      "agrees": bool(abs(diff) <= ref.get("tolerance", 3.0))})
     rep["reference_checks"] = refs
+    if p.get("reference_series_file"):
+        try:
+            rep["reference_series"] = compare_reference_series(p["reference_series_file"], grid=grid, store=store,
+                                                               source_name=source_name, cfg=cfg, live=live,
+                                                               spinup_hours=spinup_hours, domain_end=domain_end)
+        except Exception as e:                                       # noqa: BLE001 - a reference never breaks a check
+            rep["notes"].append(f"Reference series not compared: {type(e).__name__}: {e}")
 
     # ---- verdict
     ranked = {v: e["season_rank"]["median"] for v, e in out.items() if "season_rank" in e}
@@ -484,6 +491,89 @@ def check_fire(fire, *, grid, store, source_name, cfg, live, days_before=14, day
         rep["notes"].insert(0, "SYNTHETIC demo weather — these numbers say nothing about the real fire.")
     rep["status"] = "ok"
     return rep
+
+
+REFERENCE_DIR = SEED.parent
+
+
+def load_reference_series(name) -> dict:
+    """A reference file next to the seed catalog (static/geo/reference/...). Names are relative; no other folders."""
+    path = (REFERENCE_DIR / str(name)).resolve()
+    if REFERENCE_DIR.resolve() not in path.parents:
+        raise ValueError(f"reference file outside the catalog folder: {name}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _series_times(s) -> pd.DatetimeIndex:
+    n = len(s["values"])
+    t0 = pd.Timestamp(s["start"])
+    if t0.tzinfo is not None:
+        t0 = t0.tz_convert(None)
+    return pd.date_range(t0, periods=n, freq="D" if s.get("step") == "day" else "h")
+
+
+def compare_reference_series(name, *, grid, store, source_name, cfg, live, spinup_hours=720, domain_end=None) -> dict:
+    """This tool's values against a whole series from an independent earlier run, at the cell nearest each series'
+    pixel. Daily series are compared with this tool's FWI_daily by date; hourly series hour by hour (UTC)."""
+    ref = load_reference_series(name)
+    lat_all = grid.points.latitude.values.astype(float)
+    lon_all = grid.points.longitude.values.astype(float)
+    todo = [s for s in ref.get("series", []) if s.get("compare", True)]
+    cells, where = [], {}
+    for s in todo:
+        d = np.hypot((lat_all - s["lat"]) * 111.2, (lon_all - s["lon"]) * 111.2 * math.cos(math.radians(s["lat"])))
+        i = int(d.argmin())
+        pid = int(grid.points.point_id.values[i])
+        where[id(s)] = (pid, round(float(d[i]), 3), int(grid.points.std_offset_h.values[i]))
+        if pid not in cells:
+            cells.append(pid)
+    if not todo:
+        return {"id": ref.get("id"), "label": ref.get("label"), "series": []}
+    t_all = [_series_times(s) for s in todo]
+    start = min(t[0] for t in t_all).to_pydatetime()
+    end = max(t[-1] + (pd.Timedelta(hours=23) if s.get("step") == "day" else pd.Timedelta(0))
+              for s, t in zip(todo, t_all)).to_pydatetime()
+    if domain_end is not None:
+        end = min(pd.Timestamp(end), pd.Timestamp(domain_end)).to_pydatetime()
+    times, steps, frac, _ = store.series(source_name, cfg.id, cells, start, end)
+    origin = "saved results (continuous record)"
+    need = {s["quantity"] for s in todo}
+    if frac < 0.9999 or not need <= set(steps):
+        res = live(cells, start, end, spinup_hours, cfg)
+        m = res.analysis_mask
+        times = res.times[m]
+        steps = {k: np.asarray(v)[m] for k, v in res.steps.items()}
+        origin = f"computed now ({spinup_hours} h spin-up)"
+    times = pd.DatetimeIndex(times)
+    out = []
+    for s, ts in zip(todo, t_all):
+        q = s["quantity"]
+        pid, dist, off = where[id(s)]
+        if q not in steps:
+            out.append({"quantity": q, "system": s.get("system"), "skipped": f"{q} is not available from this run"})
+            continue
+        col = cells.index(pid)
+        a = np.asarray(steps[q], dtype=float)[:, col]
+        refv = np.array([np.nan if v is None else v for v in s["values"]], dtype=float)
+        if s.get("step") == "day":
+            dd, dm = _daily(times, a[:, None], off, q)
+            ours = pd.Series(dm[:, 0], index=pd.DatetimeIndex(dd)).reindex(ts).values
+        else:
+            ours = pd.Series(a, index=times).reindex(ts).values
+        t_from = pd.Timestamp(s.get("compare_from") or ts[0])
+        t_from = t_from.tz_convert(None) if t_from.tzinfo is not None else t_from
+        m = (ts >= t_from) & np.isfinite(ours) & np.isfinite(refv)
+        st = {"n": int(m.sum())}
+        if m.sum() >= 3:
+            dlt = ours[m] - refv[m]
+            st.update(mean_diff=_r(dlt.mean()), mae=_r(np.abs(dlt).mean()), max_abs_diff=_r(np.abs(dlt).max()),
+                      r=_r(np.corrcoef(ours[m], refv[m])[0, 1], 3) if np.std(ours[m]) > 0 and np.std(refv[m]) > 0 else None,
+                      ref_mean=_r(refv[m].mean()), ours_mean=_r(ours[m].mean()))
+        out.append({"quantity": q, "system": s.get("system"), "note": s.get("note"), "cell": pid, "cell_distance_km": dist,
+                    "compare_from": str(t_from), "step": s.get("step"), "start": str(ts[0]),
+                    "times": [str(t) for t in ts], "ref": [_r(v) for v in refv], "ours": [_r(v) for v in ours], "stats": st})
+    return {"id": ref.get("id"), "label": ref.get("label"), "made_by": ref.get("made_by"), "weather": ref.get("weather"),
+            "start_up": ref.get("start_up"), "origin": origin, "series": out}
 
 
 def _r(x, nd=2):
@@ -596,6 +686,20 @@ def html_report(reports, title="WUP known-fire checks") -> str:
                 parts.append(f"<tr><td>{esc(c['label'])}</td><td>{esc(c['value'])}</td><td>{esc(c['ours'])} <small>{esc(c['at'])}</small></td>"
                              f"<td>{esc(c['diff'])}</td><td class='{('ok' if c['agrees'] else 'bad')}'>{('yes' if c['agrees'] else 'no')} (±{c.get('tolerance', 3)})</td>"
                              f"<td><small>{esc(c.get('basis'))}</small></td></tr>")
+            parts.append("</table>")
+        rs = r.get("reference_series") or {}
+        if rs.get("series"):
+            parts.append(f"<p><b>Whole series from an earlier run:</b> {esc(rs.get('label'))}. {esc(rs.get('start_up'))} "
+                         f"This tool: {esc(rs.get('origin'))}.</p><table><tr><th>Quantity</th><th>n</th><th>Mean (earlier → this)</th>"
+                         "<th>Mean Δ</th><th>MAE</th><th>r</th><th>From</th></tr>")
+            for x in rs["series"]:
+                if x.get("skipped"):
+                    parts.append(f"<tr><td>{esc(x['quantity'])}</td><td colspan='6'>{esc(x['skipped'])}</td></tr>")
+                    continue
+                st = x.get("stats", {})
+                parts.append(f"<tr><td>{esc(x['quantity'])} <small>{esc(x.get('system'))}</small></td><td>{st.get('n')}</td>"
+                             f"<td>{esc(st.get('ref_mean'))} → {esc(st.get('ours_mean'))}</td><td>{esc(st.get('mean_diff'))}</td>"
+                             f"<td>{esc(st.get('mae'))}</td><td>{esc(st.get('r'))}</td><td><small>{esc(x.get('compare_from'))}</small></td></tr>")
             parts.append("</table>")
     parts.append("</body></html>")
     return "".join(parts)

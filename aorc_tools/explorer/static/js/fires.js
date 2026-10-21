@@ -154,6 +154,15 @@
             r.reference_checks.map(c => `<tr><td>${W.esc(c.label)}<div class="r">${W.esc(c.basis || '')}</div></td><td class="v">${W.fmt(c.value)}</td><td class="v">${W.fmt(c.ours)}<div class="r">${W.esc(c.at || '')}</div></td><td class="v">${W.fmt(c.diff)}</td>
               <td><span class="tag ${c.agrees ? 'fixed' : 'open'}">${c.agrees ? 'yes' : 'no'}</span> <small class="r">±${c.tolerance}</small></td></tr>`).join('') + '</tbody></table>';
         }
+        const rs = r.reference_series;
+        if (rs?.series?.length) {
+          html += `<h3>Whole series from an earlier run</h3><div class="hint">${W.esc(rs.label || '')} · ${W.esc(rs.made_by || '')}<br>${W.esc(rs.start_up || '')} This tool: ${W.esc(rs.origin || '')}.</div>
+            <table class="t"><thead><tr><th>Quantity</th><th style="text-align:right">n</th><th style="text-align:right">mean (earlier → this)</th><th style="text-align:right">mean Δ</th><th style="text-align:right">MAE</th><th style="text-align:right">r</th><th>Compared from</th></tr></thead><tbody>` +
+            rs.series.map(x => x.skipped ? `<tr><td>${W.esc(x.quantity)}</td><td colspan="6" class="r">${W.esc(x.skipped)}</td></tr>` :
+              `<tr><td>${W.esc(x.quantity)}<div class="r">${W.esc(x.system || '')} · cell ${x.cell} (${W.fmt(x.cell_distance_km * 1000, 0)} m from its pixel)</div></td><td class="v">${x.stats.n}</td>
+               <td class="v">${W.fmt(x.stats.ref_mean)} → ${W.fmt(x.stats.ours_mean)}</td><td class="v">${W.fmt(x.stats.mean_diff)}</td><td class="v">${W.fmt(x.stats.mae)}</td><td class="v">${W.fmt(x.stats.r, 3)}</td><td><small class="r">${W.esc(String(x.compare_from).slice(0, 16))}</small></td></tr>`).join('') +
+            '</tbody></table><div id="fr-refcharts" class="fr-charts"></div>';
+        }
       }
     }
     box.innerHTML = html;
@@ -165,7 +174,21 @@
     if (r?.status === 'ok' && r.fire?.id === p.id) drawCharts(r);
   }
 
+  function drawRefCharts(r) {
+    const box = $('fr-refcharts'); if (!box) return;
+    box.innerHTML = '';
+    for (const x of (r.reference_series?.series || []).filter(x => !x.skipped && (x.quantity === 'FWI' || x.quantity === 'FFMC' || x.quantity === 'FWI_daily'))) {
+      const div = document.createElement('div'); box.appendChild(div);
+      const fdi = x.quantity === 'FFMC' ? 'FWI' : (x.quantity === 'FWI_daily' ? 'FWI' : x.quantity);
+      W.drawLineChart(div, { times: x.times.map(t => new Date(t.replace(' ', 'T') + (x.step === 'day' ? '' : 'Z'))),
+        lines: [{ v: x.ref, color: '#9aa0a6', w: 1.4, dash: '4 3', label: 'earlier run' }, { v: x.ours, color: W.COLOR[fdi] || '#f0a24b', w: 1.8, label: 'this tool' }],
+        title: `${x.quantity} · earlier run (dashed) vs this tool · ${x.step === 'day' ? 'daily' : 'hourly, UTC'}`, height: 165, daily: x.step === 'day',
+        xFmt: d => d.toISOString().slice(5, 10), tip: true });
+    }
+  }
+
   function drawCharts(r) {
+    drawRefCharts(r);
     const box = $('fr-charts'); if (!box) return;
     box.innerHTML = '';
     const ids = ORDER.filter(k => k in r.indices);

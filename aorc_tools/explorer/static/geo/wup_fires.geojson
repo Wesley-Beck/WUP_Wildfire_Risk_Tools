@@ -8,13 +8,14 @@
                     "acres": 700, "type": "WF", "cause": "", "location_precision": "point of origin",
                     "source": "Michigan DNR / NIFC records (All_Wildfires_in_Michigan_and_more_EXCEL.xlsx, FireDiscov / IncidentSi)",
                     "notes": "Largest WUP fire > 100 ac with valid coordinates in that spreadsheet; the project's event-window case study.",
+                    "reference_series_file": "reference/pinery-2009-earlier-run.json",
                     "reference": [
                       {"id": "classic-daily", "label": "Classic daily FWI on the discovery day", "quantity": "FWI_daily", "day": "2009-05-20", "value": 15.5, "tolerance": 3.0,
                        "basis": "Your earlier real-AORC run (xclim cffwis, origin pixel). That run took noon as 18Z (13:00 EST) and started 85/6/15 on 2009-05-13; this tool uses 12:00 LST (17Z) and spin-up, so a few units of difference are expected."},
                       {"id": "fwi2025-18z", "label": "Hourly FWI2025 at 18Z on the discovery day", "quantity": "FWI", "time": "2009-05-20T18:00:00Z", "value": 11.7, "tolerance": 3.0,
-                       "basis": "Your earlier real-AORC run with the official cffdrs-ng hFWI (origin pixel, cold start 2009-05-13). Same equations as this tool's cffdrs-ng mode; start-up differs."},
+                       "basis": "Your earlier real-AORC run with the official cffdrs-ng hFWI (nearest pixel of its 8-cell stride sample, 46.732 N 88.402 W, ~2.9 km south of the origin; cold start 2009-05-13). Same equations as this tool's cffdrs-ng mode; start-up differs."},
                       {"id": "fwi2025-peak", "label": "Hourly FWI2025 evening peak on the discovery day", "quantity": "FWI", "peak_day": "2009-05-20", "value": 20.5, "hour_utc": 23, "tolerance": 3.0,
-                       "basis": "Same earlier run: peak 20.5 at 23Z."}
+                       "basis": "Same earlier run and pixel: peak 20.5 at 21Z and 23Z."}
                     ]}},
     {"type": "Feature", "geometry": {"type": "Point", "coordinates": [-88.0426, 46.715]},
      "properties": {"id": "summit-lake-2024", "name": "Summit Lake Fire", "county": "Baraga", "discovered": "2024-10-18T21:17:09Z", "date_only": false,

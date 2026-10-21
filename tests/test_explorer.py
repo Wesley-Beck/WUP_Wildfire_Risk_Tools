@@ -175,6 +175,15 @@ def test_fire_catalog_and_check(app, client):
     assert r["window"]["discovery_local_day"] == "2009-05-20"
     assert {"FWI", "FWI_daily", "ERC", "BI"} <= set(r["indices"])
     assert len(r["reference_checks"]) == 3
+    rs = r["reference_series"]                         # the earlier real-AORC Pinery run, compared series by series
+    q = {x["quantity"]: x for x in rs["series"]}
+    assert {"FWI_daily", "FWI", "FFMC", "ISI", "BUI"} <= set(q)
+    assert len(q["FWI"]["ref"]) == 576 and q["FWI"]["ref"][7 * 24 + 18] == 11.74      # 2009-05-20 18Z
+    assert q["FWI"]["stats"]["n"] > 300 and q["FWI_daily"]["stats"]["n"] >= 10
+    assert q["FWI"]["cell_distance_km"] < 0.6 and q["FWI_daily"]["cell_distance_km"] < 0.6
+    from aorc_tools.explorer.fires import load_reference_series
+    with pytest.raises(ValueError):
+        load_reference_series("../wup_fires.geojson/../../../server.py")
     r = client.post("/api/fires/craig-lake-2026/check", json={}).get_json()
     assert r["status"] == "no-location"
 
