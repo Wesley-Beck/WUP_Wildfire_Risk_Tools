@@ -76,6 +76,25 @@ COMPANION papers. Deadline: July 1, 2026 (no resubmission).
   - Fire checks also compare whole series with the earlier real-AORC Pinery demo
     (`static/geo/reference/pinery-2009-earlier-run.json`).
   - Tests: `tests/test_lines.py`.
+  - Lines metrics give a max AND a min at every timescale: hour of day, month, season (with smoothed spring/fall
+    peaks and summer trough), year, and the whole record.
+  - Comparator = mainland cells off the lines (Isle Royale excluded, lat ≥ 47.6).
+  - Random shifted-corridor null test (199 copies).
+  - Review fixes (independent review 2026-10-21):
+    - S/tau direction; tie-corrected Mann–Kendall + Hamed–Rao;
+    - smoothing needs ≥ 5 days each side; local extremes interior to their window;
+    - 365-day dates;
+    - part-days (< 20 h) dropped; Dec 31 completed;
+    - cross-check keeps raw attributes.
+  Patterns (2026-10-21; `patterns.py`, `drivers.py`, Patterns tab, `--patterns`, `--drivers`; USAGE "Patterns tab"):
+  - Spring/fall high-danger windows per cell and year, with area envelopes (staffing/funding).
+  - Groupings (scipy.ndimage.label, km²).
+  - Daily vs hourly FWI per cell ("daily adequate" = rank r ≥ 0.9 and kappa ≥ 0.6).
+  - Drivers per brick (Shapley R² shares, dominant driver on high days, FWI ISI/BUI split).
+  - Jobs save hourly driver diagnostics for 10 cells per brick (`<ws>/diagnostics`, float16, never fails a job).
+  - Layers to compare later (vegetation, mine waste, occurrence) + the metals hypothesis evidence table:
+    `docs/research_layers_plan.md`. Mine waste = fuel-break / human-proxy mask, not a proven fire mechanism.
+  - Tests: `tests/test_patterns.py`.
 - `docs/future_glarm_plan.md` — futures with GLARM (GATED on a full-record PASS). Key facts: public GLARM-Proj1 has
   only daily lake temp/ice/T2m → need RegCM SRF fields from Xue's group; Yu et al. 2023 give NO weights (sensitivity,
   skill, 5.2 projections only) → weights must be built (W1 equal/agreement, W2 Yu Fig. 3, W3 WUP's own skill).

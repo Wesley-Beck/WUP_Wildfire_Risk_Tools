@@ -43,8 +43,19 @@ python -m aorc_tools.explorer --full-record   # headless: NDVI if missing -> who
 python -m aorc_tools.explorer --bundle D:/WUP_FDI_bundle.zip   # one zip: program + inputs + NDVI + results + manifest
 python -m aorc_tools.explorer --lines-download hifld   # current transmission lines (final HIFLD release; or osm)
 python -m aorc_tools.explorer --lines         # fire danger along every line layer: seasonality, intensity, trends
+python -m aorc_tools.explorer --patterns      # fire-season windows, groupings, daily vs hourly FWI
+python -m aorc_tools.explorer --drivers       # which weather variable drives each index, per brick
 python -m aorc_tools.explorer --self-test     # check this computer before a long run (Run_Self_Test.bat)
 ```
+
+The **Patterns** tab covers four things:
+- when the spring and fall high-danger windows open and close each year, per county and brick (for staffing and
+  funding dates) and how they are shifting;
+- how large the connected high-danger areas are;
+- where classic daily FWI can stand in for hourly FWI;
+- which variable (temperature, humidity, wind, rain, fuel dryness) drives each index in each brick.
+
+Layers to compare later (vegetation, mine waste, fire occurrence) are in `docs/research_layers_plan.md`.
 
 The **Lines** tab compares fire danger along power lines with the region. It covers seasonal peaks and troughs,
 annual maxima, days above regional percentiles, nights that do not recover, and Theil–Sen / Mann–Kendall trends,

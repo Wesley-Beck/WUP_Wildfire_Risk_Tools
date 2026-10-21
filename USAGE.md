@@ -569,6 +569,53 @@ Limits:
 - AORC changes source streams by era (non-precipitation fields around 2015). Look for steps at those dates before
   reading a trend as climate change.
 
+### Patterns tab: fire seasons, groupings, daily vs hourly, driving variables
+
+All four analyses read the saved record. Run them after the full record (`--full-record` runs Patterns at the end).
+Daily maxima and minima are cached per year in `WUP_Explorer_data/daily`, so re-runs are quick.
+
+- **Season windows (staffing and funding dates).**
+  - For every cell and year, the spring (Mar 1–Jul 15) and fall (Jul 16–Nov 30) high-danger windows: the days whose
+    15-day smoothed daily maximum is at or above the regional *season pct* percentile (default 80th).
+  - Areas reported: the mainland WUP, each county, Isle Royale and each brick.
+  - For each area and year: median opening and closing dates (10–90% across the area's cells), window length, and
+    the share of cells with a window.
+  - Trends of each date are reported (Sen slope; p corrected for serial correlation).
+  - The **envelope** runs from the 10th percentile of opening dates to the 90th percentile of closing dates, over
+    the whole record and over the last 20 years. A staff or funding period inside it covers most cell-windows.
+- **Groupings.**
+  - On every day, the connected areas (8-neighbour) of cells at or above the regional *grouping pct* percentile
+    (default 95th).
+  - Reported: their number, mean and largest size (km²), a size distribution, yearly trends, and how often each
+    cell is part of a grouping of 100 km² or more.
+- **Daily vs hourly FWI.** The classic daily FWI (12:00 LST) is compared per cell with the hourly system's daily
+  maximum and its 12:00 value:
+  - correlation and rank correlation;
+  - agreement on high days (each system's own regional 90th percentile; kappa, hit rate, false alarms);
+  - the afternoon peak the noon value misses;
+  - the hour of the hourly peak;
+  - by month and by year.
+
+  Cells with rank correlation ≥ 0.9 and kappa ≥ 0.6 are marked *daily adequate*. The literature behind each choice
+  is in `docs/research_layers_plan.md`.
+- **Driving variables per brick.**
+  - For a fixed sample of cells in each brick, the drivers at the hour of each daily maximum: temperature,
+    humidity, wind, 72 h rain, and fuel dryness (BUI) or 1000-h fuel moisture or greenness, depending on the index.
+  - **Shares of the variability** come from a Shapley/LMG decomposition of R², per brick, index and season part.
+  - The **dominant driver on high days** is the most dangerous anomaly against the brick-month climatology.
+  - For FWI, the split between ISI (wind + fine fuels) and BUI (deep-fuel dryness) is also reported.
+  - Jobs save these drivers for 10 cells per brick while the record is computed (`WUP_Explorer_data/diagnostics`,
+    about 1 GB for the whole record). The analysis then needs no second pass over the weather. Without them it
+    re-runs the sample (`--drivers`).
+
+```bat
+WUP_Explorer.exe --patterns      :: season windows, groupings, daily vs hourly (also at the end of --full-record)
+WUP_Explorer.exe --drivers       :: driving variables per brick (uses the saved diagnostics when present)
+```
+
+Results go to `WUP_Explorer_data/patterns/` (CSV + `summary.json`). They are included in the research bundle's
+*Analyses* part.
+
 ### Data tab: inputs, offline use, climate datasets, verification, research bundle
 
 Click the source badge (top bar) or the **Data** tab.

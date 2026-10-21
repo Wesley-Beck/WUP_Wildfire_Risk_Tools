@@ -127,3 +127,30 @@ def test_driver_analysis_on_synthetic_weather(grid, tmp_path):
     assert "fwi_split" in fwi and {"spring", "summer", "fall"} & set(s["results"]["FWI"]["25_18"])
     assert "wind" not in s["results"]["ERC"]["25_18"]["all"]["shares"]
     assert da.file(r["id"], "drivers.csv").exists()
+
+
+def test_jobs_save_driver_diagnostics_that_match_the_record(grid, tmp_path):
+    from aorc_tools.explorer.drivers import DriverAnalysis, diagnostics_path, diagnostics_sample
+    from aorc_tools.explorer.server import build
+    ws = tmp_path / "ws"
+    Workspace(ws).save_settings(domain_start="2009-04-01T00", domain_end="2009-11-30T23")
+    app = build(ws, source="synthetic", start_jobs=False)
+    E = app.extensions["wup"]
+    cfg = ChainConfig()
+    jid = E["jobs"].create("d", "synthetic", cfg, ["25_18"], "2009-04-01T00", "2009-05-12T23")
+    assert E["jobs"].run_now(jid)["status"] == "done"
+    sample = diagnostics_sample(grid)["25_18"]
+    f = diagnostics_path(ws, "synthetic", cfg.id, 2009, 21, "25_18")
+    assert f.exists()
+    with np.load(f) as z:
+        assert z["point_ids"].tolist() == sample and len(z["hours"]) == 144
+        fwi_diag = z["FWI"].astype(float)
+        t0 = pd.Timestamp("1970-01-01") + pd.Timedelta(hours=int(z["hours"][0]))
+    times, steps, frac, _ = E["store"].series("synthetic", cfg.id, sample, t0, t0 + pd.Timedelta(hours=143))
+    assert frac == 1.0
+    np.testing.assert_allclose(fwi_diag, steps["FWI"], atol=0.05 + 0.002 * np.nanmax(steps["FWI"]))   # float16 vs int16 packing
+    da = DriverAnalysis(E["ws"], E["grid"], E["store"], E["ctx"])
+    r = da.run("synthetic", cfg, years=[2009], mode="diagnostics")
+    s = da.summary(r["id"])
+    assert s["from"]["diagnostics_brick_years"] == 1 and s["from"]["recomputed_brick_years"] == 0
+    assert "25_18" in s["results"]["FWI"]

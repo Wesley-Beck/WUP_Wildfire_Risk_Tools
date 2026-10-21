@@ -4,8 +4,9 @@
   const S = W.S;
   S.pat = { list: [], summary: null, index: 'FWI', area: 'WUP mainland', task: null, msg: '', cellKey: 'FWI_compare.kappa',
     drivers: null, dpart: 'all', dtask: null, dmsg: '' };
-  const DCOL = { temperature: '#e8a04a', humidity: '#3987e5', wind: '#9085e9', rain_72h: '#199e70', fuel_dryness_BUI: '#d95926',
-    fuel_moisture_1000h: '#d95926', greenness: '#7fb069' };
+  /* fixed colour per driver (validated categorical slots, CVD-checked in every index's bar order) */
+  const DCOL = { temperature: '#d95926', humidity: '#3987e5', wind: '#199e70', rain_72h: '#c98500', fuel_dryness_BUI: '#d55181',
+    fuel_moisture_1000h: '#d55181', greenness: '#008300' };
   const IDX = ['FWI', 'FWI_daily', 'ERC', 'BI', 'FPI'];
   const IDX_LABEL = { FWI: 'FWI hourly (daily max)', FWI_daily: 'FWI classic daily', ERC: 'ERC', BI: 'BI', FPI: 'FPI' };
   const NS = 'http://www.w3.org/2000/svg';
@@ -195,7 +196,7 @@
       <table class="t"><thead><tr><th>Brick</th><th>R²</th><th style="width:45%">Shares of the variability</th><th>Most extreme on high days</th>${v.startsWith('FWI') ? '<th>ISI / BUI</th>' : ''}</tr></thead><tbody>
       ${Object.entries(R).sort().map(([bk, parts]) => { const e = parts[P.dpart]; if (!e) return '';
         const tot = drv.reduce((a, k) => a + Math.max(0, e.shares[k] || 0), 0) || 1;
-        const bar = drv.map(k => `<span title="${W.esc(D.labels[k])}: ${W.fmt(e.shares[k], 3)}" style="display:inline-block;height:10px;width:${(100 * Math.max(0, e.shares[k] || 0) / tot).toFixed(1)}%;background:${DCOL[k]}"></span>`).join('');
+        const bar = drv.map(k => `<span title="${W.esc(D.labels[k])}: ${W.fmt(e.shares[k], 3)}" style="display:inline-block;height:10px;width:${(100 * Math.max(0, e.shares[k] || 0) / tot).toFixed(1)}%;background:${DCOL[k]};box-shadow:inset -2px 0 0 #1c1e21"></span>`).join('');
         const dom = Object.entries(e.dominant_on_high_days || {}).sort((a, b) => b[1] - a[1])[0];
         return `<tr><td>${bk}</td><td class="v">${W.fmt(e.r2, 2)}</td><td><div style="display:flex;width:100%;border-radius:3px;overflow:hidden">${bar}</div></td>
           <td>${dom ? `${W.esc(D.labels[dom[0]])} <small class="r">${W.pct(100 * dom[1], 0)}</small>` : '—'}</td>

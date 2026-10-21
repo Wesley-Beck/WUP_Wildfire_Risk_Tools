@@ -406,12 +406,47 @@ class JobRunner:
         if wx.size and (wx >= 9).all():
             from aorc_tools.explorer.sources import NoDataYet
             raise NoDataYet(f"no weather at all for brick {bkey}, {ch['start']:%Y-%m-%d %H}:00 onward: nothing saved")
+        if self.ws.settings.get("diagnostics", True):
+            try:                                      # driver diagnostics for a fixed cell sample: never fails a job
+                self.save_diagnostics(source, cfg, bkey, pids, ch, raw, state, spin)
+            except Exception as e:                    # noqa: BLE001
+                logger.warning("driver diagnostics for %s %s/k%s not saved: %s", bkey, ch["year"], ch["k"], e)
         return {"brick": bkey, "times": res.times[m], "point_ids": pids,
                 "steps": {k: np.asarray(v)[m] for k, v in res.steps.items()},
                 "start_state": res.start_state, "end_state": res.end_state, "continuity": continuity,
                 "prev_rowid": prow["_rowid"] if (prow and state is not None) else None,
                 "ndvi_sig": self.ctx.ndvi_signature(cfg, source, ch["year"]) if hasattr(self.ctx, "ndvi_signature") else None,
                 "seconds": _time.perf_counter() - tc}
+
+
+    def save_diagnostics(self, source, cfg, bkey, pids, ch, raw, state, spin):
+        """Hourly drivers (weather, BUI, ISI, 1000-h moisture, greenness) and indices for the brick's fixed diagnostics
+        sample, from the same weather and start state as the saved chunk: the Patterns tab's driving-variable analysis
+        then needs no second pass over the weather. float16, compressed (~1 GB for the whole record)."""
+        from aorc_tools.explorer.drivers import DIAG_KEYS, diagnostics_path, diagnostics_sample
+        from aorc_tools.explorer.sources import RawWindow
+        want = diagnostics_sample(self.grid).get(bkey, [])
+        pos = {int(p_): i for i, p_ in enumerate(pids)}
+        idx = np.array([pos[p_] for p_ in want if p_ in pos], dtype=int)
+        if not len(idx):
+            return
+        sub = RawWindow(times=raw.times, point_ids=np.asarray(pids)[idx], data={k: v[:, idx] for k, v in raw.data.items()},
+                        source=raw.source, tiers=None if raw.tiers is None else raw.tiers[:, idx])
+        st = None if state is None else {k: np.asarray(v)[idx] for k, v in state.items()}
+        res = run_chain(sub, grid=self.grid, cfg=cfg, state=st, spinup_hours=spin, mode="trace",
+                        ndvi=self.ctx.ndvi_for(cfg, source), fuel_map=self.ctx.fuel_map)
+        from aorc_tools.explorer.drivers import derived_weather
+        m = res.analysis_mask
+        steps = {k: np.asarray(v)[m] for k, v in res.steps.items() if k in DIAG_KEYS or k in sub.data}
+        steps.update(derived_weather(steps))
+        arrays = {k: np.clip(steps[k], -6e4, 6e4).astype(np.float16) for k in DIAG_KEYS if k in steps}
+        path = diagnostics_path(self.ws.root, source, cfg.id, ch["year"], ch["k"], bkey)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.stem + ".tmp.npz")
+        hours = ((pd.DatetimeIndex(res.times[m]) - pd.Timestamp("1970-01-01")) // pd.Timedelta("1h")).values.astype(np.int64)
+        np.savez_compressed(tmp, hours=hours, point_ids=np.asarray(res.point_ids, dtype=np.int64), **arrays)
+        from aorc_tools.explorer.runtime import replace_file
+        replace_file(tmp, path)
 
 
 def _is_permanent(e) -> bool:

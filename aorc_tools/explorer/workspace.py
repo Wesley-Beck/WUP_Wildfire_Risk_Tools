@@ -216,7 +216,7 @@ class Workspace:
         return s
 
     # ------------------------------------------------------------------ housekeeping
-    TMP_DIRS = ("results", "inputs", "climatology", "exports", "datasets", "fires", "bias", "daily", "lines", "patterns")
+    TMP_DIRS = ("results", "inputs", "climatology", "exports", "datasets", "fires", "bias", "daily", "lines", "patterns", "diagnostics")
 
     def cleanup_tmp(self) -> int:
         """Delete half-written files left by a crash or power cut (``*.tmp``). Call only while holding the

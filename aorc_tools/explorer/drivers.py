@@ -55,6 +55,40 @@ LABELS = {"temperature": "temperature", "humidity": "relative humidity", "wind":
           "fuel_dryness_BUI": "fuel dryness (BUI)", "fuel_moisture_1000h": "1000-h fuel moisture", "greenness": "greenness",
           "ISI": "spread: wind + fine fuels (ISI)", "BUI": "build-up: deep-fuel dryness (BUI)"}
 PARTS = {"all": (3, 11), "spring": (3, 6), "summer": (7, 8), "fall": (9, 11)}
+DIAG_CELLS = 10                       # cells per brick whose drivers are saved while the record is computed
+DIAG_KEYS = ["temperature", "humidity", "wind", "precip", "BUI", "ISI", "FM1000", "RG", "FWI", "FWI_daily", "ERC", "BI", "FPI"]
+
+
+def derived_weather(S):
+    """Temperature (C), relative humidity (%), 10 m wind (km/h) and precipitation (mm/h) from the AORC fields, with the
+    chain's own conversion functions."""
+    from aorc_tools.explorer.chain import (kelvin_to_celsius, ms_to_kph, specific_to_relative_humidity as rh_fn,
+                                           wind_components_to_speed)
+    tk = np.asarray(S["TMP_2maboveground"], dtype=np.float64)
+    return {"temperature": kelvin_to_celsius(tk),
+            "humidity": rh_fn(np.asarray(S["SPFH_2maboveground"], dtype=np.float64), tk, np.asarray(S["PRES_surface"], dtype=np.float64)),
+            "wind": ms_to_kph(wind_components_to_speed(np.asarray(S["UGRD_10maboveground"], dtype=np.float64),
+                                                        np.asarray(S["VGRD_10maboveground"], dtype=np.float64))),
+            "precip": np.asarray(S["APCP_surface"], dtype=np.float64)}
+
+
+def diagnostics_sample(grid, n_per_brick=DIAG_CELLS, seed=11):
+    """The fixed cells per brick (mainland where possible) whose hourly drivers are kept during jobs."""
+    key = (id(grid), n_per_brick, seed)
+    cache = diagnostics_sample.__dict__.setdefault("_cache", {})
+    if key not in cache:
+        pts = grid.points
+        rng = np.random.default_rng(seed)
+        out = {}
+        for (ci, cj), g in pts.groupby(["ci", "cj"]):
+            g = g[g.latitude < ISLE_ROYALE_LAT] if (g.latitude < ISLE_ROYALE_LAT).any() else g
+            out[f"{ci}_{cj}"] = sorted(int(x) for x in rng.choice(g.point_id.values, size=min(n_per_brick, len(g)), replace=False))
+        cache[key] = out
+    return cache[key]
+
+
+def diagnostics_path(ws_root, source, cfg_id, year, k, brick):
+    return ws_root / "diagnostics" / source / cfg_id / str(year) / f"k{int(k):03d}_{brick}.npz"
 
 
 def shapley_r2(X, y):
@@ -114,8 +148,7 @@ class DriverAnalysis:
 
     def _year_days(self, source, cfg, bkey, pids, year, src, chain_kw):
         """Trace run for the sample cells, Mar-Nov of ``year``; per local day, the drivers at each index's daily max."""
-        from aorc_tools.explorer.chain import (kelvin_to_celsius, ms_to_kph, run_chain, specific_to_relative_humidity as rh_fn,
-                                               wind_components_to_speed)
+        from aorc_tools.explorer.chain import run_chain
         d0, d1 = src.domain(self.ws.settings)
         start = max(d0, datetime(year, 3, 1) - timedelta(hours=6))
         end = min(d1, datetime(year, 12, 1, 6))
@@ -136,12 +169,36 @@ class DriverAnalysis:
         res = run_chain(raw, grid=self.grid, cfg=cfg, state=state, spinup_hours=spin, mode="trace", **chain_kw)
         m = res.analysis_mask
         S = {k: np.asarray(v)[m] for k, v in res.steps.items()}
-        times = pd.DatetimeIndex(res.times[m])
-        tk = S["TMP_2maboveground"].astype(np.float64)
-        T = kelvin_to_celsius(tk)
-        RH = rh_fn(S["SPFH_2maboveground"].astype(np.float64), tk, S["PRES_surface"].astype(np.float64))
-        WS = ms_to_kph(wind_components_to_speed(S["UGRD_10maboveground"].astype(np.float64), S["VGRD_10maboveground"].astype(np.float64)))
-        P = np.nan_to_num(S["APCP_surface"].astype(np.float64))
+        return self._daily_table(S, pd.DatetimeIndex(res.times[m]), pids, year)
+
+    def _year_days_diag(self, source, cfg_id, bkey, year):
+        """The same daily table from the diagnostics saved while the record was computed (no weather re-read)."""
+        files = sorted((self.ws.root / "diagnostics" / source / cfg_id / str(year)).glob(f"k*_{bkey}.npz"))
+        if not files:
+            return None
+        parts, pids = [], None
+        for f in files:
+            with np.load(f) as z:
+                if pids is None:
+                    pids = z["point_ids"].copy()
+                elif not np.array_equal(pids, z["point_ids"]):
+                    continue                                              # sample changed: keep the first one
+                parts.append({k: z[k].astype(np.float32) if k not in ("hours", "point_ids") else z[k].copy() for k in z.files})
+        hours = np.concatenate([p_["hours"] for p_ in parts])
+        order = np.argsort(hours, kind="stable")
+        hours, keep = np.unique(hours[order], return_index=True)
+        S = {}
+        for k in DIAG_KEYS:
+            if all(k in p_ for p_ in parts):
+                S[k] = np.concatenate([p_[k] for p_ in parts])[order][keep]
+        times = pd.Timestamp("1970-01-01") + pd.to_timedelta(hours, unit="h")
+        return self._daily_table(S, pd.DatetimeIndex(times), pids, year)
+
+    def _daily_table(self, S, times, pids, year):
+        if "temperature" not in S:
+            S = {**S, **derived_weather(S)}
+        T, RH, WS = (np.asarray(S[k], dtype=np.float64) for k in ("temperature", "humidity", "wind"))
+        P = np.nan_to_num(np.asarray(S["precip"], dtype=np.float64))
         cs = np.cumsum(np.vstack([np.zeros((1, P.shape[1])), P]), axis=0)
         i = np.arange(len(times))
         R72 = cs[i + 1] - cs[np.maximum(0, i - 71)]
@@ -186,22 +243,36 @@ class DriverAnalysis:
                 out.append(rec)
         return pd.concat(out, ignore_index=True) if out else None
 
-    def run(self, source, cfg, years=None, n_per_brick=12, progress=None, chain_kw=None) -> dict:
+    def run(self, source, cfg, years=None, n_per_brick=12, progress=None, chain_kw=None, mode="auto") -> dict:
+        """mode: "auto" (diagnostics saved during the record where they exist, else re-run), "diagnostics" or
+        "recompute"."""
         progress = progress or (lambda done, total, note="": None)
         src = self.ctx.source_for(source)
         chain_kw = chain_kw if chain_kw is not None else {"ndvi": self.ctx.ndvi_for(cfg, source), "fuel_map": self.ctx.fuel_map}
         d0, d1 = src.domain(self.ws.settings)
         years = years or list(range(d0.year, d1.year + 1))
         samp = self.sample(n_per_brick)
+        diag_root = self.ws.root / "diagnostics" / source / cfg.id
+        use_diag = mode in ("auto", "diagnostics") and diag_root.exists() and any(diag_root.rglob("*.npz"))
+        if mode == "diagnostics" and not use_diag:
+            raise ValueError("no driver diagnostics saved for this source and configuration (they are saved while jobs run)")
+        if use_diag:
+            samp = {k: v for k, v in diagnostics_sample(self.grid).items() if k in samp}
         steps = len(samp) * len(years) + 2
         done = 0
         frames = []
+        n_diag = n_recomputed = 0
         for bkey, pids in samp.items():
             for y in years:
                 progress(done, steps, f"drivers: brick {bkey}, {y}")
                 done += 1
                 try:
-                    f = self._year_days(source, cfg, bkey, pids, y, src, chain_kw)
+                    f = self._year_days_diag(source, cfg.id, bkey, y) if use_diag else None
+                    if f is not None:
+                        n_diag += 1
+                    elif mode != "diagnostics":
+                        f = self._year_days(source, cfg, bkey, pids, y, src, chain_kw)
+                        n_recomputed += f is not None
                 except Exception as e:                                     # noqa: BLE001 - a missing year is not fatal
                     logger.warning("drivers: brick %s %s skipped (%s)", bkey, y, e)
                     continue
@@ -214,7 +285,8 @@ class DriverAnalysis:
         D["month"] = (pd.to_datetime(D["year"].astype(str) + "-01-01") + pd.to_timedelta(D["day"], unit="D")).dt.month
         progress(done, steps, "attribution")
         summary = {"id": f"{source}__{cfg.id}", "source": source, "config_id": cfg.id, "created": now_iso(),
-                   "years": [int(min(years)), int(max(years))], "cells_per_brick": n_per_brick,
+                   "years": [int(min(years)), int(max(years))], "cells_per_brick": max(len(v) for v in samp.values()),
+                   "from": {"diagnostics_brick_years": n_diag, "recomputed_brick_years": n_recomputed},
                    "samples": {k: v for k, v in samp.items()}, "labels": LABELS, "drivers": DRIVERS,
                    "method": ("Shapley (LMG) shares of the R2 of a linear regression of the index on its standardised drivers; "
                               "dominant driver on high days = most dangerous standardised anomaly vs the brick-month "
