@@ -132,8 +132,10 @@ class TaskRunner:
                 raise Cancelled()
             self._set(tid, done=int(done), total=int(total), note=str(note)[:500])
 
+        from aorc_tools.explorer.runtime import keep_awake
         try:
-            result = self.kinds[t["kind"]](t["id"], t["params"], progress)
+            with keep_awake:                             # Windows: no sleep while a data task runs
+                result = self.kinds[t["kind"]](t["id"], t["params"], progress)
             errs = (result or {}).get("errors") or []
             self._set(tid, status="done-with-errors" if errs else "done", result=json.dumps(result, default=str))
         except Cancelled:
@@ -190,7 +192,7 @@ class TaskRunner:
         from aorc_tools.explorer import ndvi_ingest as NI
         years = [int(y) for y in params["years"]]
         backend, product = params.get("backend", "planetary"), params.get("product", "MOD13Q1")
-        kw = {}
+        kw = {"force": bool(params.get("force"))}
         if backend == "local":
             kw["folder"] = params["folder"]
         if backend == "appeears":

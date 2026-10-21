@@ -45,6 +45,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from aorc_tools.explorer import hdf
 from aorc_tools.explorer.grid import CHUNK_TIME, Brick, Grid
 from aorc_tools.explorer.sources import VARIABLES, BaseSource
 from aorc_tools.explorer.workspace import now_iso
@@ -108,21 +109,22 @@ LON_NAMES = ["lon", "longitude", "XLONG", "xlon", "nav_lon"]
 def _open_any(path):
     """Local NetCDF/GRIB-free files, Zarr stores, OPeNDAP endpoints, or plain HTTPS / s3:// NetCDF objects."""
     import xarray as xr
+    from aorc_tools.explorer.hdf import open_dataset
     remote = bool(re.match(r"^[a-z0-9+]+://", path))
     if path.rstrip("/").endswith(".zarr"):
         so = {"anon": True} if path.startswith("s3://") else None
         return xr.open_zarr(path, decode_times=False, storage_options=so)
     if not remote or re.search(r"dodsC|opendap|/dap[0-9]?/|thredds", path, re.I):
-        return xr.open_dataset(path, decode_times=False)           # local file or OPeNDAP (netCDF4 engine)
+        return open_dataset(path, decode_times=False)              # local file or OPeNDAP (netCDF4 engine)
     try:                                                          # netCDF-C byte-range reads over HTTPS
         if path.startswith("http"):
-            return xr.open_dataset(path + ("" if "#mode=bytes" in path else "#mode=bytes"), decode_times=False)
+            return open_dataset(path + ("" if "#mode=bytes" in path else "#mode=bytes"), decode_times=False)
     except Exception:
         pass
     import fsspec                                                 # s3:// or HTTPS object through fsspec + h5netcdf
     fs_kw = {"anon": True} if path.startswith("s3://") else {}
     fobj = fsspec.open(path, "rb", **fs_kw).open()
-    return xr.open_dataset(fobj, engine="h5netcdf", decode_times=False)
+    return open_dataset(fobj, engine="h5netcdf", decode_times=False)
 
 
 def slugify(s):
@@ -207,16 +209,30 @@ class Regridder:
             self.kind = "idw4"
             LAT, LON = (lat, lon) if lat.ndim == 2 else np.meshgrid(lat, lon, indexing="ij")
             self.ny, self.nx = LAT.shape
-            sv = self._xyz(LAT.ravel(), LON.ravel())
+            flat_lat, flat_lon = LAT.ravel(), LON.ravel()
+            # only model points near the targets take part (memory stays small for big model domains)
+            step_deg = 0.0
+            if LAT.shape[0] > 1:
+                step_deg = float(np.nanmedian(np.abs(np.diff(LAT, axis=0))))
+            if LAT.shape[1] > 1:
+                step_deg = max(step_deg, float(np.nanmedian(np.abs(np.diff(LON, axis=1)))))
+            pad = max(0.5, 3 * step_deg)
+            near = np.where((flat_lat >= t_lat.min() - pad) & (flat_lat <= t_lat.max() + pad) &
+                            (flat_lon >= t_lon.min() - pad) & (flat_lon <= t_lon.max() + pad) &
+                            np.isfinite(flat_lat) & np.isfinite(flat_lon))[0]
+            if len(near) < 16:
+                near = np.where(np.isfinite(flat_lat) & np.isfinite(flat_lon))[0]
+            sv = self._xyz(flat_lat[near], flat_lon[near])
             tv = self._xyz(t_lat, t_lon)
-            k = 4
+            k = min(4, len(near))
             self.flat = np.zeros((len(t_lat), k), dtype=np.int64)
             d = np.zeros((len(t_lat), k))
-            for s in range(0, len(t_lat), 4096):
-                dd = 2 - 2 * (tv[s:s + 4096] @ sv.T)                     # squared chord distance
-                part = np.argpartition(dd, k, axis=1)[:, :k]
-                self.flat[s:s + 4096] = part
-                d[s:s + 4096] = np.take_along_axis(dd, part, axis=1)
+            blk = max(64, int(2e7 // max(1, len(near))))                   # ~160 MB of distances at most
+            for s in range(0, len(t_lat), blk):
+                dd = 2 - 2 * (tv[s:s + blk] @ sv.T)                       # squared chord distance
+                part = np.argpartition(dd, k - 1, axis=1)[:, :k] if k < dd.shape[1] else np.argsort(dd, axis=1)[:, :k]
+                self.flat[s:s + blk] = near[part]
+                d[s:s + blk] = np.take_along_axis(dd, part, axis=1)
             dist = np.sqrt(np.maximum(d, 0)) * 6371.0
             wt = 1.0 / np.maximum(dist, 1e-3) ** 2
             self.w = wt / wt.sum(axis=1, keepdims=True)
@@ -302,6 +318,7 @@ class DatasetSource(BaseSource):
         self._open: OrderedDict = OrderedDict()
         self._cache_files = cache_files
         self._regrid: dict = {}
+        self._gridkeys: dict = {}
         self._lock2 = threading.Lock()
 
     # ---- files and time index
@@ -405,7 +422,13 @@ class DatasetSource(BaseSource):
         return la, lo
 
     def _regridder(self, path, ds, t_lat, t_lon, key):
-        rk = (path, key)
+        """One regridder per (model grid, brick), shared by every file on the same grid."""
+        gk = self._gridkeys.get(path)
+        if gk is None:
+            la, lo = self._latlon(ds)
+            gk = (la.shape, lo.shape, float(np.nansum(la[::7])), float(np.nansum(lo[::7])))
+            self._gridkeys[path] = gk
+        rk = (gk, key)
         if rk not in self._regrid:
             la, lo = self._latlon(ds)
             self._regrid[rk] = Regridder(la, lo, t_lat, t_lon)
@@ -451,8 +474,9 @@ class DatasetSource(BaseSource):
                 name = name.replace(".zarr", "") + ".nc"
             dst = dest / name
             tmp = dst.with_suffix(".tmp")
-            sub.load().to_netcdf(tmp, encoding=enc)
-            os.replace(tmp, dst)
+            hdf.to_netcdf(sub, tmp, encoding=enc)
+            from aorc_tools.explorer.runtime import replace_file
+            replace_file(tmp, dst)
             out.append(str(dst))
             if progress:
                 progress(i + 1, len(files), name)
@@ -603,12 +627,18 @@ class DatasetRegistry:
                 continue
         return out
 
+    @staticmethod
+    def _check(slug):
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", str(slug or "")):
+            raise ValueError(f"invalid dataset name {slug!r}")
+        return slug
+
     def get(self, slug):
-        f = self.dir / f"{slug}.json"
+        f = self.dir / f"{self._check(slug)}.json"
         return self._expand(json.loads(f.read_text())) if f.exists() else None
 
     def local_dir(self, slug) -> Path:
-        return self.ws.root / "inputs" / "datasets" / slug
+        return self.ws.root / "inputs" / "datasets" / self._check(slug)
 
     def set_local(self, slug, files):
         """Point a dataset at its offline copy (keeping the original locations for reference)."""
@@ -638,4 +668,4 @@ class DatasetRegistry:
         return self._expand(cfg)
 
     def delete(self, slug):
-        (self.dir / f"{slug}.json").unlink(missing_ok=True)
+        (self.dir / f"{self._check(slug)}.json").unlink(missing_ok=True)

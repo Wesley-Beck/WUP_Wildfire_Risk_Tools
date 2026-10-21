@@ -14,11 +14,15 @@ so a session can be closed and picked up again (or copied to another machine).
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chunks (
@@ -56,6 +60,8 @@ DEFAULT_SETTINGS = {
     "download_workers": 3,
     "offline": False,             # read AORC only from the local input store
     "workspace_root": None,       # where the catalog paths point (rewritten when the folder moves)
+    "min_free_gb": 5.0,           # jobs and downloads pause below this much free disk
+    "job_auto_retries": 8,        # a job that fails (network, S3) is retried automatically this many times
 }
 
 
@@ -125,6 +131,14 @@ class Workspace:
             cols = {r[1] for r in c.execute("PRAGMA table_info(chunks)").fetchall()}
             if "path" not in cols:                       # workspaces created by an earlier build
                 c.execute("ALTER TABLE chunks ADD COLUMN path TEXT")
+            if "prev_rowid" not in cols:                 # which predecessor row a chunk continued from
+                c.execute("ALTER TABLE chunks ADD COLUMN prev_rowid INTEGER")
+            if "ndvi_sig" not in cols:                   # fingerprint of the NDVI files FPI was computed with
+                c.execute("ALTER TABLE chunks ADD COLUMN ndvi_sig TEXT")
+            jcols = {r[1] for r in c.execute("PRAGMA table_info(jobs)").fetchall()}
+            for col, typ in (("attempts", "INTEGER DEFAULT 0"), ("retry_at", "TEXT")):
+                if col not in jcols:
+                    c.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typ}")
         self.settings = self._load_settings()
         self.relocated = self._relocate()
         readme = self.root / "results" / "README.txt"
@@ -157,12 +171,19 @@ class Workspace:
         return n
 
     # ------------------------------------------------------------------
+    @contextmanager
     def conn(self):
+        """A catalog connection: commits on success, rolls back on error, always closes."""
         c = sqlite3.connect(self.db_path, timeout=60, check_same_thread=False)
-        c.row_factory = sqlite3.Row
-        c.execute("PRAGMA journal_mode=WAL")
-        c.execute("PRAGMA synchronous=NORMAL")
-        return c
+        try:
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA synchronous=NORMAL")
+            c.execute("PRAGMA busy_timeout=60000")
+            with c:
+                yield c
+        finally:
+            c.close()
 
     def _load_settings(self):
         p = self.root / "settings.json"
@@ -170,16 +191,89 @@ class Workspace:
         if p.exists():
             try:
                 s.update(json.loads(p.read_text()))
-            except Exception:
-                pass
+            except Exception as e:                       # keep the damaged file for inspection, start from defaults
+                bad = p.with_name(f"settings.json.bad-{datetime.now():%Y%m%d-%H%M%S}")
+                try:
+                    p.replace(bad)
+                except OSError:
+                    pass
+                logger.warning("settings.json was unreadable (%s); saved as %s, using defaults", e, bad.name)
+        for k, default in DEFAULT_SETTINGS.items():      # a hand-edited or old value of the wrong type -> default
+            v = s.get(k)
+            if v is None or default is None or isinstance(default, str):
+                continue
+            try:
+                if isinstance(default, bool):
+                    ok = isinstance(v, bool)
+                else:
+                    s[k] = type(default)(v)
+                    ok = True
+            except (TypeError, ValueError):
+                ok = False
+            if not ok:
+                logger.warning("setting %s=%r is not valid; using %r", k, v, default)
+                s[k] = default
         return s
+
+    # ------------------------------------------------------------------ housekeeping
+    TMP_DIRS = ("results", "inputs", "climatology", "exports", "datasets", "fires", "bias")
+
+    def cleanup_tmp(self) -> int:
+        """Delete half-written files left by a crash or power cut (``*.tmp``). Call only while holding the
+        workspace lock, so no other process can be writing them."""
+        n = 0
+        for f in self.root.glob("*.tmp"):
+            try:
+                f.unlink()
+                n += 1
+            except OSError:
+                pass
+        for d in self.TMP_DIRS:
+            base = self.root / d
+            if not base.exists():
+                continue
+            for f in base.rglob("*"):
+                if f.is_file() and (f.suffix == ".tmp" or ".tmp." in f.name or f.name.endswith(".tmp.npz")):
+                    try:
+                        f.unlink()
+                        n += 1
+                    except OSError:
+                        pass
+        for f in (self.root / "cache").rglob("*.tmp.npz") if (self.root / "cache").exists() else []:
+            try:
+                f.unlink()
+                n += 1
+            except OSError:
+                pass
+        return n
+
+    def quarantine(self, path, kind: str, reason: str) -> Path | None:
+        """Move a damaged file aside (never delete data silently) and log why."""
+        path = Path(path)
+        dest_dir = self.root / "quarantine" / kind
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{path.name}.{datetime.now():%Y%m%d-%H%M%S}"
+        try:
+            if path.exists():
+                path.replace(dest)
+            else:
+                dest = None
+        except OSError as e:
+            logger.warning("could not move %s to quarantine (%s)", path, e)
+            dest = None
+        with open(self.root / "quarantine" / "log.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"time": now_iso(), "kind": kind, "file": str(path), "moved_to": str(dest) if dest else None,
+                                 "reason": str(reason)[:500]}) + "\n")
+        logger.warning("quarantined %s (%s): %s", path.name, kind, reason)
+        return dest
 
     def save_settings(self, **kw):
         with self._lock:
             self.settings.update({k: v for k, v in kw.items() if k in DEFAULT_SETTINGS or k in self.settings})
-            tmp = self.root / "settings.json.tmp"
+            from aorc_tools.explorer.runtime import replace_file
+            tmp = self.root / f"settings.json.{threading.get_ident()}.tmp"
             tmp.write_text(json.dumps(self.settings, indent=2))
-            tmp.replace(self.root / "settings.json")
+            replace_file(tmp, self.root / "settings.json")
         return self.settings
 
     @property

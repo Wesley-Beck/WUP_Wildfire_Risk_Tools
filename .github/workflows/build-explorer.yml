@@ -31,7 +31,9 @@ jobs:
       - name: Unit tests (explorer)
         run: |
           pip install pytest
-          python -m pytest tests/test_explorer.py tests/test_data_pipeline.py -q
+          python -m pytest tests/test_explorer.py tests/test_data_pipeline.py tests/test_robustness.py -q
+      - name: Record the package versions the tests passed with
+        run: pip freeze --exclude-editable > requirements-tested.txt
       - name: Build
         run: pyinstaller --noconfirm --clean packaging/wup_explorer.spec
       - name: Smoke test the executable
@@ -51,10 +53,15 @@ jobs:
           ./dist/WUP_Explorer --source synthetic --workspace smoke_ws --bundle smoke_bundle.zip --bundle-parts app,catalog
           python -m aorc_tools.explorer.bundle check smoke_bundle.zip
           python -c "import zipfile,sys; n=zipfile.ZipFile('smoke_bundle.zip').namelist(); sys.exit(0 if any(x.endswith('app/aorc_tools/explorer/verify.py') for x in n) else 1)"
+      - name: Self-test of the executable (offline parts)
+        shell: bash
+        run: ./dist/WUP_Explorer --self-test --workspace selftest_ws || true
       - uses: actions/upload-artifact@v4
         with:
           name: WUP_Explorer-${{ runner.os }}
-          path: dist/WUP_Explorer*
+          path: |
+            dist/WUP_Explorer*
+            requirements-tested.txt
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2

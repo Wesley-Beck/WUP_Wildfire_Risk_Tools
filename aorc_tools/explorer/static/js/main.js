@@ -209,8 +209,10 @@
     try {
       const r = await W.api('/api/jobs'); S.jobs = r.jobs;
       const act = r.jobs.filter(j => j.status === 'running' || j.status === 'queued');
+      const wait = r.jobs.filter(j => j.status === 'retrying');
       const pill = $('jobpill');
       if (act.length) { const j = act[0]; pill.style.display = ''; pill.innerHTML = `<span class="spin"></span> job #${j.id} <b>${W.fmt(j.percent, 1)}%</b>${act.length > 1 ? ` (+${act.length - 1})` : ''}`; }
+      else if (wait.length) { const j = wait[0]; pill.style.display = ''; pill.title = j.error || ''; pill.innerHTML = `job #${j.id} waiting to retry <b>${W.esc((j.retry_at || '').slice(11, 16))}</b>`; }
       else pill.style.display = 'none';
       if (S.tab === 'JOBS') W.drawJobList();
       const sig = JSON.stringify(act.map(j => [j.id, j.packets_done]));

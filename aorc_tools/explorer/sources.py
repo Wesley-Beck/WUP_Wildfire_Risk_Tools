@@ -113,16 +113,27 @@ class BrickCache:
         tmp = p.with_name(p.stem + f".{threading.get_ident()}.tmp.npz")
         np.savez_compressed(tmp, times_ns=times.values.astype("datetime64[ns]").astype("int64"),
                             meta=np.array(json.dumps(meta)), **{v: a.astype(np.float32) for v, a in arrays.items()})
-        tmp.replace(p)
+        from aorc_tools.explorer.runtime import replace_file
+        replace_file(tmp, p)
         self._evict()
 
     def _evict(self):
-        files = sorted(self.dir.rglob("*.npz"), key=lambda f: f.stat().st_mtime)
-        total = sum(f.stat().st_size for f in files)
+        def stat(f):                                 # another worker may evict the same file at the same time
+            try:
+                st = f.stat()
+                return st.st_mtime, st.st_size
+            except OSError:
+                return None
+        files = [(f, st) for f in self.dir.rglob("*.npz") if not f.name.endswith(".tmp.npz") and (st := stat(f))]
+        files.sort(key=lambda x: x[1][0])
+        total = sum(st[1] for _, st in files)
         while total > self.max_bytes and files:
-            f = files.pop(0)
-            total -= f.stat().st_size
-            f.unlink(missing_ok=True)
+            f, st = files.pop(0)
+            total -= st[1]
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def usage(self) -> dict:
         files = list(self.dir.rglob("*.npz"))
@@ -349,6 +360,17 @@ class OfflineMissing(RuntimeError):
     """Raised in offline mode when a brick/time chunk is not in the local input store."""
 
 
+class AORCLayoutError(RuntimeError):
+    """The AORC store's grid does not match points_index.csv (not transient: never retried)."""
+
+
+class NoDataYet(RuntimeError):
+    """The requested hours are past the end of the AORC store (not retried)."""
+
+
+S3_RETRY_WAITS = (5, 20, 60, 180)     # seconds between attempts at one S3 read (about 4.5 min before giving up)
+
+
 class AORCSource(BaseSource):
     """NOAA AORC v1.1, read brick-by-brick.
 
@@ -371,6 +393,8 @@ class AORCSource(BaseSource):
         self.keep_inputs = keep_inputs
         self.offline = offline
         self._origin: dict = {}
+        self._sleep = _time.sleep                 # replaceable in tests
+        self.retry_waits = S3_RETRY_WAITS
 
     @property
     def loader(self):
@@ -380,22 +404,49 @@ class AORCSource(BaseSource):
         return self._loader
 
     def origin_of_year(self, year):
-        if year not in self._origin:
-            if self.offline:
-                return datetime(1979, 2, 1) if year == 1979 else datetime(year, 1, 1)
-            ds = self.loader._open_dataset(year)
-            self._origin[year] = pd.Timestamp(ds.time.values[0]).to_pydatetime()
-        return self._origin[year]
+        # AORC v1.1 year stores start on Jan 1 00 UTC (1979: Feb 1). Known layout, so no network is needed to plan
+        # chunks; every S3 read checks that the store's hour at the chunk start is the expected one.
+        return datetime(1979, 2, 1) if year == 1979 else datetime(year, 1, 1)
 
     def last_time(self, year):
         ds = self.loader._open_dataset(year)
         return pd.Timestamp(ds.time.values[-1]).to_pydatetime()
+
+    def refresh_data_end(self, settings, timeout=30.0):
+        """Find the last hour NOAA has published at or before the configured domain end (network; bounded by
+        ``timeout``). Afterwards ``domain()`` never asks for hours that do not exist yet."""
+        want = pd.Timestamp(settings.get("domain_end", "2026-09-30T23"))
+        out = {}
+
+        def probe():
+            for year in range(want.year, max(want.year - 2, 1978), -1):
+                try:
+                    out["t"] = self.last_time(year)
+                    return
+                except Exception as e:                  # noqa: BLE001 - that year's store may not exist yet
+                    out["err"] = e
+        th = threading.Thread(target=probe, daemon=True)
+        th.start()
+        th.join(timeout)
+        if "t" in out:
+            self._data_end = (out["t"], _time.time())
+            logger.info("AORC data end: %s", out["t"])
+        return getattr(self, "_data_end", (None, 0))[0]
+
+    def domain(self, settings: dict):
+        d0, d1 = super().domain(settings)
+        de = getattr(self, "_data_end", (None, 0))[0]
+        if de is not None and de < d1:
+            d1 = de                                       # NOAA has not published past this hour yet
+        return d0, d1
 
     def status(self):
         s = super().status()
         s["cache"] = self.cache.usage()
         s["mode"] = "offline (local input store only)" if self.offline else "online (S3 + local input store)"
         s["offline"] = self.offline
+        de = getattr(self, "_data_end", (None, 0))[0]
+        s["data_end"] = de.isoformat() if de is not None else None
         return s
 
     def _raw_brick_chunk(self, grid: Grid, year: int, k: int, brick: Brick):
@@ -403,7 +454,12 @@ class AORCSource(BaseSource):
         la0, la1 = int(sub.lat_idx.min()), int(sub.lat_idx.max()) + 1
         lo0, lo1 = int(sub.lon_idx.min()), int(sub.lon_idx.max()) + 1
         if self.inputs is not None:
-            got = self.inputs.read_brick_chunk(year, k, brick.key, (la0, la1), (lo0, lo1))
+            try:
+                got = self.inputs.read_brick_chunk(year, k, brick.key, (la0, la1), (lo0, lo1))
+            except Exception as e:                      # damaged file (power cut, bad copy): set it aside, refetch
+                logger.warning("input chunk %d/k%03d unreadable (%s): quarantined", year, k, e)
+                self.inputs.quarantine(year, k, f"unreadable: {e}")
+                got = None
             if got is not None:
                 arrays, times, meta = got
                 return arrays, times, meta, True
@@ -414,24 +470,7 @@ class AORCSource(BaseSource):
         if self.offline:
             raise OfflineMissing(f"AORC {year} chunk {k} brick {brick.key} is not in the local input store "
                                  "(offline mode). Connect to the internet or download that period first (Data tab).")
-        ds = self.loader._open_dataset(year)
-        t_idx0 = k * CHUNK_TIME
-        t_idx1 = min(t_idx0 + CHUNK_TIME, ds.sizes["time"])
-        lat_live = float(ds.latitude.values[la0]); lon_live = float(ds.longitude.values[lo0])
-        lat_exp = grid.lat0 + la0 * grid.step; lon_exp = grid.lon0 + lo0 * grid.step
-        if abs(lat_live - lat_exp) > 1e-4 or abs(lon_live - lon_exp) > 1e-4:
-            raise RuntimeError(
-                f"AORC coordinate mismatch: store lat/lon at index ({la0},{lo0}) = ({lat_live:.5f},{lon_live:.5f}) "
-                f"but points_index implies ({lat_exp:.5f},{lon_exp:.5f}). Regenerate points_index.csv.")
-        t0 = _time.perf_counter()
-        sel = ds.isel(time=slice(t_idx0, t_idx1), latitude=slice(la0, la1), longitude=slice(lo0, lo1))
-        arrays = {v: np.asarray(sel[v].values, dtype=np.float32) for v in VARIABLES if v in sel}
-        times = pd.DatetimeIndex(sel.time.values)
-        meta = {"lat_idx_range": [la0, la1], "lon_idx_range": [lo0, lo1],
-                "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "seconds": round(_time.perf_counter() - t0, 2), "store": f"s3://{self.loader.BUCKET}/{year}.zarr"}
-        logger.info("fetched %d/k%03d brick %s (%d x %d x %d) in %.1fs",
-                    year, k, brick.key, len(times), la1 - la0, lo1 - lo0, meta["seconds"])
+        arrays, times, meta = self._s3_read(grid, year, k, brick, la0, la1, lo0, lo1)
         if self.inputs is not None and self.keep_inputs:
             self.inputs.write_brick_chunk(year, k, brick.key, arrays, times, meta)
             # hand back exactly what the store holds, so online and offline runs give identical results
@@ -441,6 +480,58 @@ class AORCSource(BaseSource):
         else:
             self.cache.put(year, k, brick, arrays, times, meta)
         return arrays, times, meta, False
+
+    def _s3_read_once(self, grid, year, k, brick, la0, la1, lo0, lo1):
+        ds = self.loader._open_dataset(year)
+        t_idx0 = k * CHUNK_TIME
+        t_idx1 = min(t_idx0 + CHUNK_TIME, ds.sizes["time"])
+        lat_live = float(ds.latitude.values[la0]); lon_live = float(ds.longitude.values[lo0])
+        lat_exp = grid.lat0 + la0 * grid.step; lon_exp = grid.lon0 + lo0 * grid.step
+        if abs(lat_live - lat_exp) > 1e-4 or abs(lon_live - lon_exp) > 1e-4:
+            raise AORCLayoutError(
+                f"AORC coordinate mismatch: store lat/lon at index ({la0},{lo0}) = ({lat_live:.5f},{lon_live:.5f}) "
+                f"but points_index implies ({lat_exp:.5f},{lon_exp:.5f}). Regenerate points_index.csv.")
+        if t_idx0 >= ds.sizes["time"]:
+            raise NoDataYet(f"AORC {year} has no data yet for chunk {k} (the store ends "
+                            f"{pd.Timestamp(ds.time.values[-1]):%Y-%m-%d %H}:00); lower the domain end or wait for NOAA")
+        expect = self.origin_of_year(year) + timedelta(hours=t_idx0)
+        got_t = pd.Timestamp(ds.time.values[t_idx0]).to_pydatetime()
+        if abs((got_t - expect).total_seconds()) > 1:
+            raise AORCLayoutError(f"AORC {year} hour {t_idx0} is {got_t}, expected {expect}: the store layout changed")
+        t0 = _time.perf_counter()
+        sel = ds.isel(time=slice(t_idx0, t_idx1), latitude=slice(la0, la1), longitude=slice(lo0, lo1))
+        arrays = {v: np.asarray(sel[v].values, dtype=np.float32) for v in VARIABLES if v in sel}
+        times = pd.DatetimeIndex(sel.time.values)
+        if len(times) == 0 or not arrays:
+            raise RuntimeError(f"AORC {year} chunk {k}: empty read")
+        meta = {"lat_idx_range": [la0, la1], "lon_idx_range": [lo0, lo1],
+                "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "seconds": round(_time.perf_counter() - t0, 2), "store": f"s3://{self.loader.BUCKET}/{year}.zarr"}
+        logger.info("fetched %d/k%03d brick %s (%d x %d x %d) in %.1fs",
+                    year, k, brick.key, len(times), la1 - la0, lo1 - lo0, meta["seconds"])
+        return arrays, times, meta
+
+    def _s3_read(self, grid, year, k, brick, la0, la1, lo0, lo1):
+        """One brick-chunk from S3, retried with growing waits on any transient failure (connection reset,
+        timeout, throttling). The year's dataset handle is reopened before each retry."""
+        last = None
+        waits = (0,) + tuple(self.retry_waits)
+        for attempt, wait in enumerate(waits):
+            if wait:
+                logger.warning("S3 read %d/k%03d brick %s failed (%s: %s); retry %d of %d in %ds",
+                               year, k, brick.key, type(last).__name__, last, attempt, len(waits) - 1, wait)
+                self._sleep(wait)
+                cache = getattr(self.loader, "_ds_cache", None)
+                if isinstance(cache, dict):
+                    cache.pop(year, None)
+            try:
+                return self._s3_read_once(grid, year, k, brick, la0, la1, lo0, lo1)
+            except (AORCLayoutError, NoDataYet):
+                raise
+            except Exception as e:                          # noqa: BLE001 - network stacks raise many types
+                last = e
+        raise RuntimeError(f"AORC S3 read {year}/k{k:03d} brick {brick.key} failed {len(waits)} times; "
+                           f"last error {type(last).__name__}: {last}") from last
 
 
 def make_source(kind: str, **kw) -> BaseSource:

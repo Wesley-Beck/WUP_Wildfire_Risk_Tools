@@ -122,3 +122,12 @@ W.polysOf = gj => {
     if (g.type === 'Polygon') polys.push(g.coordinates); else if (g.type === 'MultiPolygon') polys.push(...g.coordinates); }
   return polys;
 };
+
+/* Safety net: any action that fails without its own error handling still tells the user what happened. */
+window.addEventListener('unhandledrejection', ev => {
+  const e = ev.reason || {};
+  const msg = e.message || String(e);
+  if (/abort/i.test(msg)) return;
+  console.error('unhandled', e);
+  try { W.toast('Something went wrong: ' + W.esc(msg.slice(0, 300)) + (e.status ? ` (HTTP ${e.status})` : '')); } catch { /* no toast yet */ }
+});

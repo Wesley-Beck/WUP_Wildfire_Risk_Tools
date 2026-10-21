@@ -583,6 +583,38 @@ WUP_Explorer.exe --offline ...                    :: any of the above from the l
 `Run_Full_Record.bat` runs `--full-record` with the bundled defaults. The exit code is 0 when verification
 passes or warns, and 2 when it fails.
 
+### Long unattended runs: what protects them
+
+Run `Run_Self_Test.bat` (`--self-test`) once on a new machine before the first full record. It checks
+the Python packages, RAM, free disk, cloud-sync folders and path lengths. It also checks the network
+(AORC on S3, Planetary Computer, AppEEARS, NOAA CDR), runs a small job end to end, and reads one real
+AORC brick-chunk. The report goes to `WUP_Explorer_data/exports/selftest_*.txt`. A FAIL line names the
+fix.
+
+What happens when something goes wrong during a day-long `--full-record`:
+
+| Problem | What the explorer does |
+|---|---|
+| Network drops or S3 times out | Each S3 read is retried (waits 5, 20, 60, 180 s). If a chunk still fails, the job goes to *waiting to retry* (1, 5, 15, 30, 60 min; up to 8 times, setting `job_auto_retries`) and resumes from the last saved chunk. Headless runs wait out the retries. |
+| No AORC on S3 at start and no local store | Unattended runs stop with exit code 4. They never fall back to demo weather. |
+| NOAA has not published the last hours yet | The job plans only published hours. Hours that are all missing are not saved, and the job stops with a clear message instead of retrying. |
+| Computer sleeps | Windows is asked not to sleep while a job or data task runs. The screen may still turn off. |
+| Power cut or crash mid-write | Every file is written to a temporary name, flushed to disk, then renamed. Leftover temporary files are removed at the next start. |
+| A results or input file is damaged | The verifier reports it (`readable_files`). `--repair` (or *Data › Repair*) moves it to `WUP_Explorer_data/quarantine/` (logged in `quarantine/log.jsonl`), and the next run recomputes or refetches it. `--full-record` does this by itself. |
+| A season was computed before the record before it | Its chunks are found not to continue from the chunk before them and are recomputed. The finished record is one continuous chain (the verifier's `continuity` check). |
+| NDVI inputs change after chunks were saved | Those chunks are recomputed, so FPI always matches the NDVI on disk. |
+| Disk nearly full | The job stops (no retries) below `min_free_gb` (default 5 GB) with a message. Free space, then resume. |
+| Two copies opened on the same workspace | The second is refused (exit code 3) or opens the first one's browser page. Two processes never write the same files. |
+| `settings.json` damaged | It is kept as `settings.json.bad-<time>` and defaults are used. |
+| Unexpected error anywhere | Logged to `WUP_Explorer_data/logs/explorer.log` (rotating, 5 x 5 MB). Native crashes are traced in `logs/faults.log`. The job scheduler keeps running. |
+
+Memory: each worker can use up to ~3 GB on the largest brick. The explorer allows at most one worker
+per 6 GB of RAM, so 2 on a 16 GB machine. Live calculations in the browser are capped at 2.5 million
+cell-hours, one at a time. Larger requests are told to use *Calculate & save*.
+
+Keep the workspace outside OneDrive, Dropbox or Google Drive folders. Sync clients lock and rewrite files
+mid-run. The explorer warns at start when it detects one.
+
 ### Results files
 
 - One NetCDF4 (CF-1.8) file per 144 h time chunk covering the whole WUP rectangle:

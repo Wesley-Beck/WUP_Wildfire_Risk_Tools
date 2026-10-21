@@ -139,7 +139,8 @@ class FireCatalog:
     def _save_user(self, feats):
         tmp = self.user_path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"type": "FeatureCollection", "features": feats}, indent=1), encoding="utf-8")
-        tmp.replace(self.user_path)
+        from aorc_tools.explorer.runtime import replace_file
+        replace_file(tmp, self.user_path)
 
     def all(self) -> list[dict]:
         user = self._load(self.user_path)

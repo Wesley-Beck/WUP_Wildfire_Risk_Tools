@@ -46,7 +46,16 @@ def _origin_fn(src):
 
 
 def _file_checks(store, grid, path, cfg, acc):
-    """Value checks on one chunk file; adds counts into ``acc``. Returns the file's chain state (study cells)."""
+    """Value checks on one chunk file; adds counts into ``acc``. Returns the file's chain state (study cells), or
+    None when the file cannot be read (recorded in ``acc['unreadable']``)."""
+    try:
+        return _file_checks_inner(store, grid, path, cfg, acc)
+    except Exception as e:                                  # damaged file: report it, keep checking the rest
+        acc["unreadable"].append({"path": str(path), "error": f"{type(e).__name__}: {e}"[:300]})
+        return None
+
+
+def _file_checks_inner(store, grid, path, cfg, acc):
     import netCDF4
     from aorc_tools.explorer.chain import STATE_KEYS
     with NC_LOCK:
@@ -112,7 +121,7 @@ def verify_record(store, grid, src, cfg, settings, mode="quick", progress=None, 
     years = [int(y) for y in (years or all_years) if int(y) in all_years]
     rep = {"source": source, "config_id": cfg.id, "config": cfg.as_dict(), "mode": mode, "created": now_iso(),
            "domain": [d0.isoformat(), d1.isoformat()], "bricks": sorted(bricks), "years": {}, "checks": {}, "problems": []}
-    acc = {"files": 0, "out_of_range": {v: 0 for v in SAVED}, "clipped": 0, "uniform_hours": 0,
+    acc = {"files": 0, "unreadable": [], "out_of_range": {v: 0 for v in SAVED}, "clipped": 0, "uniform_hours": 0,
            "daily_off_noon": 0, "fpi_pre_modis": 0, "nan_not_tier9": 0}
     expected_total = present_total = short_total = cells_short = 0
     cov = {"packets": 0, "FWI": 0, "ERC": 0, "BI": 0, "fpi_season_packets": 0, "FPI_season": 0}
@@ -173,6 +182,9 @@ def verify_record(store, grid, src, cfg, settings, mode="quick", progress=None, 
                 prev_end = prev_key = None
                 continue
             st = _file_checks(store, grid, p, cfg, acc)
+            if st is None:
+                prev_end = prev_key = None
+                continue
             if prev_end is not None and _is_next(prev_key, key):
                 for k in CONT_KEYS:
                     a, b = prev_end.get(f"end_{k}"), st.get(f"start_{k}")
@@ -218,6 +230,13 @@ def verify_record(store, grid, src, cfg, settings, mode="quick", progress=None, 
         rep["checks"]["fpi_season_coverage"] = {
             "status": "PASS" if fp >= 95.0 else "WARN", "percent_valid_apr_oct_modis_era": fp,
             "note": "FPI needs NDVI; winter gaps under snow are expected, so only April-October is checked"}
+    rep["checks"]["readable_files"] = {"status": _status(not acc["unreadable"]), "unreadable": len(acc["unreadable"]),
+                                       "files": [u["path"] for u in acc["unreadable"][:50]]}
+    for u in acc["unreadable"][:50]:
+        rep["problems"].append(f"unreadable file {Path(u['path']).name}: {u['error']}")
+    missing_files = [r["path"] for r in rows if r.get("path") and not Path(r["path"]).exists()]
+    rep["checks"]["catalog_files_exist"] = {"status": _status(not missing_files), "rows_without_file": len(missing_files)}
+    rep["unreadable_files"] = [u["path"] for u in acc["unreadable"]]
     rep["files_checked"] = acc["files"]
     st = [c["status"] for c in rep["checks"].values()]
     rep["overall"] = "FAIL" if "FAIL" in st else ("WARN" if "WARN" in st else "PASS")
@@ -258,3 +277,21 @@ def html_report(rep) -> str:
             "<h2>Checks</h2><table><tr><th>Check</th><th>Status</th><th>Details</th></tr>" + rows + "</table>"
             "<h2>Years</h2><table><tr><th>Year</th><th>Status</th><th>Brick-chunks</th><th>Missing (first)</th></tr>" + yrs + "</table>"
             + (f"<h2>Problems</h2><ul>{probs}</ul>" if probs else "") + "</body></html>")
+
+
+def repair(store, rep) -> dict:
+    """Act on a verification report: quarantine unreadable files and drop catalog rows whose file is gone, so the
+    next calculation job recomputes exactly those chunks (and, through the continuity check, any later chunk that no
+    longer continues from them)."""
+    quarantined, dropped = 0, 0
+    for path in rep.get("unreadable_files", []):
+        dropped += store.quarantine_file(path, "verification: unreadable")
+        quarantined += 1
+    with store.ws.conn() as c:
+        rows = c.execute("SELECT rowid, path FROM chunks WHERE source=? AND config_id=?",
+                         (rep["source"], rep["config_id"])).fetchall()
+        gone = [r["rowid"] for r in rows if not r["path"] or not Path(r["path"]).exists()]
+        for rid in gone:
+            c.execute("DELETE FROM chunks WHERE rowid=?", (rid,))
+    return {"quarantined_files": quarantined, "catalog_rows_dropped": dropped + len(gone),
+            "next": "run the calculation again (Calculate & save / --full-record); it recomputes what is missing"}

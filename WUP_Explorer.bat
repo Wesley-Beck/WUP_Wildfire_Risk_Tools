@@ -28,7 +28,13 @@ fc /b requirements-explorer.txt .venv\requirements.stamp >nul 2>nul
 if not errorlevel 1 goto :run
 echo Installing the explorer's packages (first run, or the requirements changed) ...
 "%VPY%" -m pip install --disable-pip-version-check -q --upgrade pip
-"%VPY%" -m pip install --disable-pip-version-check -r requirements-explorer.txt
+set "CONSTR="
+if exist requirements-tested.txt set "CONSTR=-c requirements-tested.txt"
+"%VPY%" -m pip install --disable-pip-version-check -r requirements-explorer.txt %CONSTR%
+if errorlevel 1 if defined CONSTR (
+  echo The tested package versions are not available for this Python; installing the latest compatible ones ...
+  "%VPY%" -m pip install --disable-pip-version-check -r requirements-explorer.txt
+)
 if errorlevel 1 goto :pipfail
 "%VPY%" -m pip install --disable-pip-version-check -q --no-deps -e .
 if errorlevel 1 goto :pipfail

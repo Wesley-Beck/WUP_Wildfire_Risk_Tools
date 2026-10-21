@@ -11,7 +11,8 @@ STATIC = os.path.join(ROOT, "aorc_tools", "explorer", "static")
 datas = [(STATIC, os.path.join("aorc_tools", "explorer", "static"))]
 # a source snapshot inside the exe, so research bundles made by the exe also carry runnable source + docs
 for top in ("README.md", "USAGE.md", "CLAUDE.md", "setup.py", "requirements.txt", "requirements-explorer.txt",
-            "WUP_Explorer.bat", "WUP_Explorer.command", "wup_explorer.sh", "Run_Fire_Checks.bat", "Run_Full_Record.bat"):
+            "WUP_Explorer.bat", "WUP_Explorer.command", "wup_explorer.sh", "Run_Fire_Checks.bat", "Run_Full_Record.bat",
+            "Run_Self_Test.bat", "requirements-tested.txt"):
     if os.path.exists(os.path.join(ROOT, top)):
         datas.append((os.path.join(ROOT, top), "app_source"))
 for sub in ("aorc_tools", "docs", "scripts", "packaging"):

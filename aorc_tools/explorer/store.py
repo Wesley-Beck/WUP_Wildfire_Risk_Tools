@@ -38,6 +38,8 @@ import warnings
 from datetime import datetime
 from pathlib import Path
 
+import logging
+
 import numpy as np
 import pandas as pd
 
@@ -46,6 +48,7 @@ from aorc_tools.explorer.grid import Grid
 from aorc_tools.explorer.ndvi import MODIS_START
 from aorc_tools.explorer.workspace import Workspace, now_iso
 
+logger = logging.getLogger(__name__)
 STORED = ["FWI", "FPI", "ERC", "BI"]            # the four indices (coverage, percentiles)
 SAVED = STORED + ["FWI_daily"]                  # everything written per packet
 PACK = {  # variable: (scale, long_name, units, comment)
@@ -59,7 +62,8 @@ PACK = {  # variable: (scale, long_name, units, comment)
 }
 FILL_I2 = np.int16(-32768)
 FILL_U1 = np.uint8(255)
-NC_LOCK = threading.RLock()
+from aorc_tools.explorer.hdf import HDF_LOCK as NC_LOCK  # noqa: E402  (one lock for all HDF5 use)
+from aorc_tools.explorer.runtime import fsync_file, replace_file  # noqa: E402
 TIME_UNITS = "hours since 1979-01-01 00:00:00"
 T_EPOCH = pd.Timestamp("1979-01-01")
 COUNTIES = ["Baraga", "Gogebic", "Houghton", "Iron", "Keweenaw", "Ontonagon"]
@@ -71,13 +75,20 @@ def _ts(s) -> pd.Timestamp:
 
 
 def _replace(tmp: Path, dst: Path):
-    for _ in range(40):                      # Windows refuses to replace a file another handle has open
-        try:
-            os.replace(tmp, dst)
-            return
-        except PermissionError:
-            _time.sleep(0.25)
-    os.replace(tmp, dst)
+    replace_file(tmp, dst)
+
+
+def _month_hours(a, b) -> dict:
+    """{(year, month): number of whole hours of [a, b] in that month} without building an hourly index."""
+    a, b = pd.Timestamp(a), pd.Timestamp(b)
+    out = {}
+    cur = a
+    while cur <= b:
+        nxt = (cur + pd.offsets.MonthBegin(1)).normalize()
+        stop = min(b, nxt - pd.Timedelta("1h"))
+        out[(cur.year, cur.month)] = int((stop - cur) / pd.Timedelta("1h")) + 1
+        cur = nxt
+    return out
 
 
 def _nc_times(ds):
@@ -133,9 +144,14 @@ class ResultsStore:
 
     def chunk_row(self, source, cfg_id, year, k, brick):
         with self.ws.conn() as c:
-            r = c.execute("SELECT * FROM chunks WHERE source=? AND config_id=? AND year=? AND k=? AND brick=?",
+            r = c.execute("SELECT rowid AS _rowid, * FROM chunks WHERE source=? AND config_id=? AND year=? AND k=? AND brick=?",
                           (source, cfg_id, int(year), int(k), brick)).fetchone()
         return dict(r) if r else None
+
+    def mark_continuous(self, row, prev_rowid):
+        """Record that a chunk's start state was checked against its predecessor's end state."""
+        with self.ws.conn() as c:
+            c.execute("UPDATE chunks SET continuity='continuous', prev_rowid=? WHERE rowid=?", (prev_rowid, row["_rowid"]))
 
     def has_chunk(self, source, cfg_id, year, k, brick, need_end=None):
         r = self.chunk_row(source, cfg_id, year, k, brick)
@@ -148,6 +164,54 @@ class ResultsStore:
             rows = c.execute("SELECT * FROM chunks WHERE source=? AND config_id=? AND t_end>=? AND t_start<=?",
                              (source, cfg_id, pd.Timestamp(start).isoformat(), pd.Timestamp(end).isoformat())).fetchall()
         return [dict(r) for r in rows]
+
+    @staticmethod
+    def _read_for_merge(path, times, data, tiers, state):
+        """Copy everything saved in ``path`` into the new arrays (in place); returns its per-brick metadata."""
+        import netCDF4
+        with netCDF4.Dataset(path) as ds:
+            dst = times.get_indexer(_nc_times(ds))
+            ok = dst >= 0
+            new = {}
+            for v in list(data) + list(tiers):
+                if v not in ds.variables:                  # file written before this variable existed
+                    continue
+                ds[v].set_auto_maskandscale(False)
+                new[v] = np.asarray(ds[v][:])
+            g = ds.groups.get("chain_state")
+            st = {}
+            if g is not None:
+                for key in state:
+                    if key in g.variables:
+                        g[key].set_auto_maskandscale(False)
+                        st[key] = np.asarray(g[key][:], dtype=np.float32)
+            meta = json.loads(getattr(ds, "bricks_json", "{}"))
+        for v, a in new.items():                           # only after the whole file read cleanly
+            (data if v in data else tiers)[v][dst[ok]] = a[ok]
+        state.update(st)
+        return meta
+
+    @staticmethod
+    def _readable(path) -> bool:
+        import netCDF4
+        try:
+            with NC_LOCK, netCDF4.Dataset(path) as ds:
+                for v in SAVED + ["wx_tier"]:
+                    if v in ds.variables:
+                        ds[v].set_auto_maskandscale(False)
+                        ds[v][-1]                               # touch the last chunk of each variable
+                return "time" in ds.variables
+        except Exception:
+            return False
+
+    def quarantine_file(self, path, reason) -> int:
+        """Move a damaged results file aside and drop its catalog rows (those bricks are then computed again)."""
+        path = Path(path)
+        with NC_LOCK:
+            self.ws.quarantine(path, "results", reason)
+            with self.ws.conn() as c:
+                n = c.execute("DELETE FROM chunks WHERE path=?", (str(path),)).rowcount
+        return n
 
     # ------------------------------------------------------------------ writing
     def write_chunk(self, source, cfg, year, k, chunk_start, parts, job_id=None):
@@ -172,21 +236,24 @@ class ResultsStore:
         bricks_meta = {}
         with NC_LOCK:
             if path.exists():                                   # merge with bricks saved earlier
-                with netCDF4.Dataset(path) as ds:
-                    dst = times.get_indexer(_nc_times(ds))
-                    ok = dst >= 0
-                    for v in list(data) + list(tiers):
-                        if v not in ds.variables:          # file written before this variable existed
-                            continue
-                        ds[v].set_auto_maskandscale(False)
-                        (data if v in data else tiers)[v][dst[ok]] = np.asarray(ds[v][:])[ok]
-                    g = ds.groups.get("chain_state")
-                    if g is not None:
-                        for key in state:
-                            if key in g.variables:
-                                g[key].set_auto_maskandscale(False)
-                                state[key] = np.asarray(g[key][:], dtype=np.float32)
-                    bricks_meta = json.loads(getattr(ds, "bricks_json", "{}"))
+                merged = None
+                for attempt in range(3):                        # a virus scanner may hold the file for a moment
+                    try:
+                        merged = self._read_for_merge(path, times, data, tiers, state)
+                        break
+                    except PermissionError:
+                        if attempt == 2:
+                            raise                               # never overwrite bricks we could not read
+                        _time.sleep(1.0 + attempt)
+                    except Exception as e:                      # damaged (power cut, bad copy): set aside
+                        self.quarantine_file(path, f"unreadable while merging new bricks: {type(e).__name__}: {e}")
+                        data = {v: np.full((nt, self.ny, self.nx), FILL_I2, dtype=np.int16) for v in SAVED}
+                        tiers = {v: np.full((nt, self.ny, self.nx), FILL_U1, dtype=np.uint8) for v in ("wx_tier", "ndvi_tier")}
+                        state = {f"{w}_{key}": np.full((self.ny, self.nx), np.nan, dtype=np.float32)
+                                 for w in ("start", "end") for key in STATE_KEYS}
+                        break
+                if merged is not None:
+                    bricks_meta = merged
             for p in parts:
                 rows = self.grid.rows_for(p["point_ids"])
                 yy, xx = self.y[rows], self.x[rows]
@@ -204,18 +271,21 @@ class ResultsStore:
                                            "t_end": times[-1].isoformat(), "computed": now_iso()}
             tmp = path.with_name(path.stem + f".{threading.get_ident()}.tmp")
             self._write_file(tmp, source, cfg, times, data, tiers, state, bricks_meta, year, k)
+            fsync_file(tmp)
             _replace(tmp, path)
         cnt = lambda a: json.dumps({str(int(t)): int((a == t).sum()) for t in np.unique(a)})  # noqa: E731
         with self.ws.conn() as c:
             for p in parts:
                 valid = {v: int(np.isfinite(np.asarray(p["steps"][v], dtype=float)).sum()) for v in STORED}
                 c.execute("""INSERT OR REPLACE INTO chunks (source, config_id, year, k, brick, t_start, t_end, n_hours, n_cells,
-                             valid_fwi, valid_fpi, valid_erc, valid_bi, wx_tiers, ndvi_tiers, continuity, seconds, created, job_id, path)
-                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                             valid_fwi, valid_fpi, valid_erc, valid_bi, wx_tiers, ndvi_tiers, continuity, seconds, created, job_id, path,
+                             prev_rowid, ndvi_sig)
+                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                           (source, cfg.id, int(year), int(k), p["brick"], times[0].isoformat(), times[-1].isoformat(), nt,
                            len(p["point_ids"]), valid["FWI"], valid["FPI"], valid["ERC"], valid["BI"],
                            cnt(np.asarray(p["steps"]["wx_tier"])), cnt(np.asarray(p["steps"]["ndvi_tier"])),
-                           p["continuity"], float(p.get("seconds", 0.0)), now_iso(), job_id, str(path)))
+                           p["continuity"], float(p.get("seconds", 0.0)), now_iso(), job_id, str(path), p.get("prev_rowid"),
+                           p.get("ndvi_sig")))
         return path
 
     def _grid_vars(self, ds, nt):
@@ -433,6 +503,20 @@ class ResultsStore:
 
     # ------------------------------------------------------------------ coverage
     def coverage(self, source, cfg_id, domain_start, domain_end, allow_ndvi_climatology=False):
+        """Coverage summary, cached until the catalog for this source/configuration changes."""
+        with self.ws.conn() as c:
+            sig = tuple(c.execute("SELECT COUNT(*), MAX(rowid), SUM(continuity='continuous'), SUM(valid_fpi) FROM chunks "
+                                  "WHERE source=? AND config_id=?", (source, cfg_id)).fetchone())
+        key = (source, cfg_id, str(domain_start), str(domain_end), bool(allow_ndvi_climatology), sig)
+        cache = self.__dict__.setdefault("_cov_cache", {})
+        if key in cache:
+            return {**cache[key], "seconds": 0.0, "cached": True}
+        out = self._coverage(source, cfg_id, domain_start, domain_end, allow_ndvi_climatology)
+        cache.clear()
+        cache[key] = out
+        return out
+
+    def _coverage(self, source, cfg_id, domain_start, domain_end, allow_ndvi_climatology=False):
         t0 = _time.perf_counter()
         ds, de = _ts(domain_start), _ts(domain_end)
         with self.ws.conn() as c:
@@ -461,8 +545,7 @@ class ResultsStore:
             frac = hrs / max(1, r["n_hours"])
             for v, col in (("FWI", "valid_fwi"), ("FPI", "valid_fpi"), ("ERC", "valid_erc"), ("BI", "valid_bi")):
                 valid[v] += int(round((r[col] or 0) * frac))
-            idx = pd.date_range(a, b, freq="h")
-            for (y, m), n in pd.Series(1, index=idx).groupby([idx.year, idx.month]).sum().items():
+            for (y, m), n in _month_hours(a, b).items():
                 if y in ym:
                     ym[y][m - 1] += n * r["n_cells"]
             for src, dst in ((r["wx_tiers"], wx), (r["ndvi_tiers"], nd)):
@@ -471,8 +554,7 @@ class ResultsStore:
             key = "continuous" if r["continuity"] == "continuous" else ("spin-up" if str(r["continuity"]).startswith("spinup") else "cold start")
             cont[key] = cont.get(key, 0) + 1
         dom = {y: np.zeros(12) for y in years}
-        idx = pd.date_range(ds, de, freq="h")
-        for (y, m), n in pd.Series(1, index=idx).groupby([idx.year, idx.month]).sum().items():
+        for (y, m), n in _month_hours(ds, de).items():
             dom[y][m - 1] = n * n_cells
         month_pct = {str(y): [round(100 * float(ym[y][m]) / dom[y][m], 3) if dom[y][m] else None for m in range(12)] for y in years}
         year_pct = {str(y): round(100 * float(ym[y].sum()) / float(dom[y].sum()), 3) if dom[y].sum() else None for y in years}
@@ -498,27 +580,47 @@ class ResultsStore:
 
     # ------------------------------------------------------------------ percentiles from stored data
     def build_climatology(self, source, cfg_id, out_path, stride=4, since=None):
-        pools = {v: [] for v in STORED}
+        """Percentiles of every stored value (pooled over cells and hours). The values are packed int16, so a
+        65,536-bin histogram per index gives them exactly, in constant memory, however long the record is."""
+        counts = {v: np.zeros(65536, dtype=np.int64) for v in STORED}
         months = set()
         for f in self.files(source, cfg_id):
             if since and int(f["year"]) < since:
                 continue
-            raw = self._read(f["path"], STORED)
+            try:
+                raw = self._read(f["path"], STORED)
+            except Exception as e:                         # damaged file: leave it out, say so in the log
+                logger.warning("climatology: skipping unreadable %s (%s)", f["path"], e)
+                continue
             for v in STORED:
-                a = self.unpack(v, raw[v][::stride])
-                a = a[np.isfinite(a)]
+                if v not in raw:
+                    continue
+                a = np.asarray(raw[v][::stride]).ravel()
+                a = a[a != FILL_I2].astype(np.int64) + 32768
                 if a.size:
-                    pools[v].append(a.astype(np.float32))
+                    counts[v] += np.bincount(a, minlength=65536)
             for t in raw["_times"][::24]:
                 months.add(f"{t.year}-{t.month:02d}")
         out = {"method": f"pooled-regional, whole-season, every {stride}th stored hour", "built_at": now_iso(),
                "source": source, "config_id": cfg_id, "source_months": sorted(months), "vars": {}}
         for v in STORED:
-            if pools[v]:
-                pool = np.concatenate(pools[v])
-                out["vars"][v] = {"q": np.percentile(pool, np.arange(101)).tolist(), "n": int(pool.size)}
+            n = int(counts[v].sum())
+            if not n:
+                continue
+            cum = np.cumsum(counts[v])
+            values = (np.arange(65536) - 32768) * PACK[v][0]
+            q = []
+            for p in range(101):                            # same convention as np.percentile (linear)
+                pos = p / 100.0 * (n - 1)
+                lo_i, hi_i = int(np.floor(pos)), int(np.ceil(pos))
+                vlo = values[np.searchsorted(cum, lo_i + 1)]
+                vhi = values[np.searchsorted(cum, hi_i + 1)]
+                q.append(float(vlo + (vhi - vlo) * (pos - lo_i)))
+            out["vars"][v] = {"q": q, "n": n}
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(out))
+        tmp = out_path.with_name(out_path.name + ".tmp")
+        tmp.write_text(json.dumps(out))
+        replace_file(tmp, out_path)
         return out
 
     # ------------------------------------------------------------------ one-file-per-year exports
@@ -535,6 +637,8 @@ class ResultsStore:
         tag = f"{year}_{source}_{cfg_id}"
         hourly = out_dir / f"WUP_FDI_hourly_{tag}.nc"
         daily = out_dir / f"WUP_FDI_daily_{tag}.nc"
+        # The HDF5 lock is taken per (file, variable) step, not for the whole merge, so a running job's workers
+        # are held up for a second at a time rather than for the minutes a whole-year merge takes.
         with NC_LOCK:
             with netCDF4.Dataset(files[0]["path"]) as src0:
                 cfg = ChainConfig.from_dict(json.loads(src0.config_json))
@@ -542,8 +646,11 @@ class ResultsStore:
             for f in files:
                 with netCDF4.Dataset(f["path"]) as src:
                     n_total += src.dimensions["time"].size
-            tmp = hourly.with_name(hourly.stem + ".tmp")
-            with netCDF4.Dataset(tmp, "w", format="NETCDF4") as out:
+        tmp = hourly.with_name(hourly.stem + ".tmp")
+        with NC_LOCK:
+            out = netCDF4.Dataset(tmp, "w", format="NETCDF4")
+        try:
+            with NC_LOCK:
                 t = self._grid_vars(out, n_total)
                 vs = {v: self._packed_var(out, v, n_total) for v in SAVED}
                 vs.update({v: self._tier_var(out, v, n_total) for v in ("wx_tier", "ndvi_tier")})
@@ -551,18 +658,35 @@ class ResultsStore:
                 self._global_attrs(out, source, cfg)
                 out.year = int(year)
                 out.history = f"{datetime.now().isoformat(timespec='seconds')} merged from {len(files)} chunk files"
-                n = 0
-                for f in files:
-                    with netCDF4.Dataset(f["path"]) as src:
+            n = 0
+            for f in files:
+                with NC_LOCK:
+                    src = netCDF4.Dataset(f["path"])
+                try:
+                    with NC_LOCK:
                         m = src.dimensions["time"].size
                         t[n:n + m] = src["time"][:]
-                        for v in vs:
-                            if v not in src.variables:
-                                continue
+                        names = [v for v in vs if v in src.variables]
+                    for v in names:
+                        with NC_LOCK:
                             src[v].set_auto_maskandscale(False)
                             vs[v][n:n + m, :, :] = src[v][:]
-                        n += m
-            _replace(tmp, hourly)
+                finally:
+                    with NC_LOCK:
+                        src.close()
+                n += m
+        except BaseException:
+            with NC_LOCK:
+                try:
+                    out.close()
+                except Exception:                                    # noqa: BLE001
+                    pass
+            tmp.unlink(missing_ok=True)
+            raise
+        with NC_LOCK:
+            out.close()
+        fsync_file(tmp)
+        _replace(tmp, hourly)
 
         # daily maxima over each cell's local standard day, computed in cell space (memory-light)
         off = self.grid.points.std_offset_h.values.astype(int)
@@ -606,9 +730,11 @@ class ResultsStore:
                             amx = np.argmax(np.where(np.isfinite(blk), blk, -np.inf), axis=0)
                             dmax[v][di, cm[better]] = mx[better]
                             dhr[v][di, cm[better]] = hod[tm][amx[better]].astype(np.int8)
+        tmp = daily.with_name(daily.stem + ".tmp")
         with NC_LOCK:
-            tmp = daily.with_name(daily.stem + ".tmp")
-            with netCDF4.Dataset(tmp, "w", format="NETCDF4") as out:
+            out = netCDF4.Dataset(tmp, "w", format="NETCDF4")
+        try:
+            with NC_LOCK:
                 out.createDimension("time", nd)
                 out.createDimension("latitude", self.ny)
                 out.createDimension("longitude", self.nx)
@@ -618,31 +744,47 @@ class ResultsStore:
                 t[:] = np.arange(nd)
                 la = out.createVariable("latitude", "f8", ("latitude",)); la.units, la.standard_name = "degrees_north", "latitude"; la[:] = self.lat
                 lo = out.createVariable("longitude", "f8", ("longitude",)); lo.units, lo.standard_name = "degrees_east", "longitude"; lo[:] = self.lon
-                for v in SAVED:
-                    s, ln, units, _ = PACK[v]
-                    vname = "FWI_daily_noon" if v == "FWI_daily" else f"{v}_daily_max"
+            for v in SAVED:                                          # one variable per lock hold (see export_year)
+                s, ln, units, _ = PACK[v]
+                vname = "FWI_daily_noon" if v == "FWI_daily" else f"{v}_daily_max"
+                g = np.full((nd, self.ny, self.nx), FILL_I2, dtype=np.int16)
+                g[:, self.y, self.x] = np.where(np.isfinite(dmax[v]), np.round(dmax[v] / s), FILL_I2).astype(np.int16)
+                with NC_LOCK:
                     var = out.createVariable(vname, "i2", ("time", "latitude", "longitude"), fill_value=FILL_I2,
                                              chunksizes=(31, 64, 64), **COMP)
                     var.scale_factor, var.add_offset = np.float32(s), np.float32(0)
                     var.long_name, var.units = (f"{ln} (value at the 12:00 LST observation)" if v == "FWI_daily"
                                                 else f"daily maximum of {ln} over the local standard day"), units
                     var.set_auto_maskandscale(False)
-                    g = np.full((nd, self.ny, self.nx), FILL_I2, dtype=np.int16)
-                    g[:, self.y, self.x] = np.where(np.isfinite(dmax[v]), np.round(dmax[v] / s), FILL_I2).astype(np.int16)
                     var[:] = g
-                    if v == "FWI_daily":
-                        continue
+                del g
+                if v == "FWI_daily":
+                    continue
+                gh = np.full((nd, self.ny, self.nx), -1, dtype=np.int8)
+                gh[:, self.y, self.x] = dhr[v]
+                with NC_LOCK:
                     hv = out.createVariable(f"{v}_hour_of_max", "i1", ("time", "latitude", "longitude"), fill_value=np.int8(-1),
                                             chunksizes=(31, 64, 64), **COMP)
                     hv.long_name = f"local standard hour (0-23) when {v} peaked"
                     hv.set_auto_maskandscale(False)
-                    gh = np.full((nd, self.ny, self.nx), -1, dtype=np.int8)
-                    gh[:, self.y, self.x] = dhr[v]
                     hv[:] = gh
+                del gh
+            with NC_LOCK:
                 self._static_vars(out)
                 self._global_attrs(out, source, cfg)
                 out.title = "Daily maximum fire danger indices (local standard day), Western Upper Peninsula of Michigan"
                 out.history = f"{datetime.now().isoformat(timespec='seconds')} daily maxima from hourly chunk files"
-            _replace(tmp, daily)
+        except BaseException:
+            with NC_LOCK:
+                try:
+                    out.close()
+                except Exception:                                    # noqa: BLE001
+                    pass
+            tmp.unlink(missing_ok=True)
+            raise
+        with NC_LOCK:
+            out.close()
+        fsync_file(tmp)
+        _replace(tmp, daily)
         return {"hourly": str(hourly), "daily": str(daily), "hourly_bytes": hourly.stat().st_size,
                 "daily_bytes": daily.stat().st_size, "chunk_files": len(files)}

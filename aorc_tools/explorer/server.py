@@ -57,6 +57,7 @@ from aorc_tools.explorer.store import NC_LOCK, PACK, SAVED, STORED, ResultsStore
 from aorc_tools.explorer.workspace import Workspace
 
 logger = logging.getLogger(__name__)
+LIVE_MAX_PACKETS = 2_500_000      # cells x hours per live calculation (~750 B each in trace mode)
 STATIC = Path(__file__).resolve().parent / "static"
 SOURCES = {"synthetic": "Synthetic demo weather", "aorc-s3": "NOAA AORC v1.1 on S3"}
 
@@ -138,6 +139,12 @@ class Context:
         p = NDVIProvider(self.static_dir, allow_climatology=cfg.allow_ndvi_climatology)
         return p if p.available else None
 
+    def ndvi_signature(self, cfg: ChainConfig, source_name, year) -> str:
+        p = self.ndvi_for(cfg, source_name)
+        if p is None:
+            p = NDVIProvider(self.static_dir, allow_climatology=cfg.allow_ndvi_climatology)
+        return p.signature(year) if hasattr(p, "signature") else str(getattr(p, "name", "synthetic"))
+
     def clim_path(self, source, cfg_id):
         return self.ws.root / "climatology" / f"{source}_{cfg_id}.json"
 
@@ -175,7 +182,7 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
     tasks = TaskRunner(ws, grid, ctx)
     app.extensions["wup"] = {"ws": ws, "grid": grid, "ctx": ctx, "store": store, "jobs": jobs, "fires": fire_catalog,
                              "tasks": tasks}
-    live_lock = threading.Semaphore(2)
+    live_lock = threading.Semaphore(1)                  # one live calculation at a time (memory)
     if start_jobs:
         jobs.start()
         tasks.start()
@@ -184,14 +191,49 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
     def offline_missing(e):
         return jsonify({"error": str(e), "offline_missing": True}), 409
 
+    def _local_origin(origin):
+        from urllib.parse import urlparse
+        try:
+            return urlparse(origin).hostname in ("127.0.0.1", "localhost", "::1")
+        except Exception:                               # noqa: BLE001
+            return False
+
+    @app.before_request
+    def same_machine_only():
+        """The API changes files on this computer: refuse requests that a web page from another site makes
+        through the browser (browsers always send Origin on those)."""
+        origin = request.headers.get("Origin")
+        if origin and origin != "null" and not _local_origin(origin):
+            return jsonify({"error": "requests from other web sites are not accepted"}), 403
+        return None
+
     @app.after_request
     def cors(resp):
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        origin = request.headers.get("Origin")
+        if origin and _local_origin(origin):            # the UI on another local port (?api=...) may call in
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers["Vary"] = "Origin"
+            resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+            resp.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
         if request.path.startswith("/api/"):
             resp.headers["Cache-Control"] = "no-store"
         return resp
+
+    @app.errorhandler(ValueError)
+    @app.errorhandler(KeyError)
+    @app.errorhandler(TypeError)
+    def bad_request(e):
+        logger.info("bad request %s: %s: %s", request.path, type(e).__name__, e)
+        msg = f"missing or invalid value: {e}" if isinstance(e, KeyError) else str(e)
+        return jsonify({"error": msg}), 400
+
+    @app.errorhandler(Exception)
+    def internal(e):
+        from werkzeug.exceptions import HTTPException
+        if isinstance(e, HTTPException):
+            return e
+        logger.exception("unexpected error in %s", request.path)
+        return jsonify({"error": f"{type(e).__name__}: {e}", "path": request.path}), 500
 
     def err(msg, code=400, **kw):
         return jsonify({"error": msg, **kw}), code
@@ -215,6 +257,8 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
             return []
         if isinstance(spec, list):
             return [int(p) for p in spec]
+        if not isinstance(spec, dict):
+            raise ValueError("selection must be a list of cell ids or a selection object")
         mode = spec.get("mode", "cells")
         if mode == "cells":
             return [int(p) for p in spec.get("point_ids", [])]
@@ -282,17 +326,33 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
             "zones": timebase.zone_table(),
         })
 
+    SETTING_RULES = {      # name: (type, min, max)
+        "workers": (int, 1, 16), "download_workers": (int, 1, 8), "job_spinup_hours": (int, 0, 24 * 90),
+        "cache_max_gb": (float, 0.1, 1000.0), "min_free_gb": (float, 0.5, 1000.0), "job_auto_retries": (int, 0, 100),
+        "auto_resume": (bool, None, None), "keep_inputs": (bool, None, None), "domain_end": (str, None, None)}
+
     @app.post("/api/settings")
     def settings():
         b = body()
-        allowed = {k: b[k] for k in ("workers", "auto_resume", "domain_end", "job_spinup_hours", "cache_max_gb",
-                                     "keep_inputs", "download_workers") if k in b}
-        try:
-            if "domain_end" in allowed:
-                _t(allowed["domain_end"])
-        except ValueError as e:
-            return err(str(e))
-        return jsonify(ws.save_settings(**allowed))
+        clean = {}
+        for k, (typ, lo, hi) in SETTING_RULES.items():
+            if k not in b:
+                continue
+            v = b[k]
+            try:
+                if typ is bool:
+                    if not isinstance(v, bool):
+                        raise ValueError("true or false")
+                elif typ is str:
+                    v = _t(v).strftime("%Y-%m-%dT%H")
+                else:
+                    v = typ(v)
+                    if not (lo <= v <= hi):
+                        raise ValueError(f"between {lo} and {hi}")
+            except (TypeError, ValueError) as e:
+                return err(f"setting {k}: {e}")
+            clean[k] = v
+        return jsonify(ws.save_settings(**clean))
 
     @app.post("/api/source")
     def set_source():
@@ -383,7 +443,7 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
         try:
             pids = selection_ids(b.get("selection", b.get("point_ids")))
             start, end, hours = window(b)
-            spin = int(b.get("spinup_hours", 168))
+            spin = min(max(int(b.get("spinup_hours", 168)), 0), 24 * 90)
             fdis = [f for f in b.get("fdis", FDIS) if f in FDIS] or FDIS
             cfg = cfg_from(b)
             mode = b.get("mode", "auto")
@@ -418,6 +478,10 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
         if len(pids) > max_cells:
             return err(f"{len(pids)} cells exceeds the live limit ({max_cells}). Calculate & save it as a job, "
                        f"or view the stored field.", 413, n_cells=len(pids), max_cells=max_cells)
+        if len(pids) * (hours + spin) > LIVE_MAX_PACKETS:
+            return err(f"{len(pids):,} cells x {hours + spin:,} hours (with spin-up) is too large to calculate live "
+                       f"(limit {LIVE_MAX_PACKETS:,} cell-hours, about 2 GB of memory). Use Calculate & save, a shorter "
+                       "window or fewer cells.", 413, n_cells=len(pids), hours=hours + spin)
         raw, res = live_result(pids, start, end, spin, cfg)
         m = res.analysis_mask
         steps = {k: np.asarray(v)[m] for k, v in res.steps.items()}
@@ -863,6 +927,32 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
 
     tasks.register("verify", _verify_task)
 
+    def _repair_task(tid, params, progress):
+        from aorc_tools.explorer import verify as verifymod
+        src = ctx.source_for(params["source"])
+        cfg = ChainConfig.from_dict(params["config"])
+        rep_ = verifymod.verify_record(store, grid, src, cfg, ws.settings, mode="full", progress=progress,
+                                       bricks=params.get("bricks"))
+        out = verifymod.repair(store, rep_)
+        return {**out, "unreadable": rep_["checks"]["readable_files"]["unreadable"], "verify_overall": rep_["overall"]}
+
+    tasks.register("repair", _repair_task)
+
+    @app.post("/api/data/repair")
+    def data_repair():
+        b = body()
+        try:
+            cfg = cfg_from(b)
+            source = b.get("source") or ctx.active
+            ctx.source_for(source)
+        except (KeyError, ValueError) as e:
+            return err(str(e))
+        tid = tasks.create("repair", f"Repair {source} {cfg.id}", {"source": source, "config": cfg.as_dict(),
+                                                                    "bricks": b.get("bricks")})
+        if b.get("wait"):
+            tasks.run_now(tid)
+        return jsonify(tasks.get(tid))
+
     @app.post("/api/data/verify")
     def data_verify():
         b = body()
@@ -1105,7 +1195,15 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
             abort(403)
         jobs.stop()
         tasks.stop()
-        threading.Timer(0.5, lambda: os._exit(0)).start()
+
+        def bye():
+            for fn in app.extensions["wup"].get("on_exit", []):
+                try:
+                    fn()
+                except Exception:                     # noqa: BLE001
+                    pass
+            os._exit(0)
+        threading.Timer(0.5, bye).start()
         return jsonify({"bye": True})
 
     return app

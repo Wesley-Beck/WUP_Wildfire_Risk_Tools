@@ -45,12 +45,22 @@ def port_free(host, port) -> bool:
         return s.connect_ex((host, port)) != 0
 
 
-def already_running(host, port) -> bool:
+def running_workspace(host, port):
+    """The workspace path an explorer on host:port serves, or None if nothing (or something else) is there."""
     try:
-        with urllib.request.urlopen(f"http://{host}:{port}/api/status", timeout=2) as r:
-            return r.status == 200 and b"workspace" in r.read(4000)
+        with urllib.request.urlopen(f"http://{host}:{port}/api/status", timeout=3) as r:
+            if r.status != 200:
+                return None
+            return json.loads(r.read().decode("utf-8", "replace")).get("workspace")
     except Exception:
-        return False
+        return None
+
+
+def already_running(host, port) -> bool:
+    return running_workspace(host, port) is not None
+
+
+S3_PROBE_WAIT = 30          # seconds between the start-up checks of S3 in unattended runs
 
 
 def s3_reachable(timeout=20.0) -> bool:
@@ -104,18 +114,25 @@ def main(argv=None):
     g.add_argument("--bundle", default=None, metavar="ZIP", help="write a research bundle zip (app, inputs, NDVI, results, manifest)")
     g.add_argument("--bundle-parts", default="app,results,inputs_aorc,inputs_datasets,ndvi,catalog",
                    help="comma-separated: app, results, inputs_aorc, inputs_datasets, ndvi, catalog")
+    g.add_argument("--no-ndvi", action="store_true", help="with --full-record: do not check/ingest NDVI first")
+    g.add_argument("--repair", action="store_true",
+                   help="full verification, then set aside unreadable files so the next calculation recomputes them")
+    g.add_argument("--self-test", action="store_true",
+                   help="check this computer (packages, disk, folders, network) and run a short end-to-end test; writes a report")
     args = ap.parse_args(argv)
     headless = any([args.fire_checks, args.download_aorc, args.ingest_ndvi, args.compute, args.verify, args.full_record,
-                    args.bundle])
+                    args.bundle, args.repair])
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    logging.getLogger("werkzeug").setLevel(logging.WARNING)
     base = base_dir()
-    ws_dir = Path(args.workspace) if args.workspace else default_workspace(base)
+    ws_dir = (Path(args.workspace) if args.workspace else default_workspace(base)).expanduser().resolve()
     url = f"http://{args.host}:{args.port}/"
+    if args.self_test:
+        from aorc_tools.explorer.selftest import run_self_test
+        return run_self_test(base, ws_dir, args)
 
     if not headless and not port_free(args.host, args.port):
-        if already_running(args.host, args.port):
+        other = running_workspace(args.host, args.port)
+        if other and Path(other).resolve() == ws_dir:
             print(f"WUP Grid Explorer is already running at {url} - opening it.")
             if not args.no_browser:
                 webbrowser.open(url)
@@ -125,16 +142,87 @@ def main(argv=None):
                 args.port, url = p, f"http://{args.host}:{p}/"
                 break
 
+    from aorc_tools.explorer.runtime import WorkspaceBusy, WorkspaceLock
+    lock = WorkspaceLock(ws_dir)
+    try:
+        lock.acquire(mode="headless" if (headless or args.fire_checks) else "browser",
+                     url=None if (headless or args.fire_checks) else url)
+    except WorkspaceBusy as e:
+        o = e.owner
+        if not headless and not args.fire_checks and o.get("url"):
+            from urllib.parse import urlparse
+            u = urlparse(o["url"])
+            other = None
+            for _ in range(20):                    # a double-click: the first copy may still be starting its server
+                other = running_workspace(u.hostname or args.host, u.port or args.port)
+                if other:
+                    break
+                time.sleep(1)
+            if other and Path(other).resolve() == ws_dir:
+                print(f"This workspace is already open in the explorer at {o['url']} - opening it.")
+                if not args.no_browser:
+                    webbrowser.open(o["url"])
+                return 0
+        print("\n" + str(e) + "\n", file=sys.stderr)
+        return 3
+    try:
+        return _main_locked(args, base, ws_dir, url, headless, lock)
+    finally:
+        lock.release()
+
+
+def _main_locked(args, base, ws_dir, url, headless, lock):
+    from aorc_tools.explorer.runtime import disk_free_gb, start_logging, sync_folder
+    logs = start_logging(ws_dir)
+    log = logging.getLogger("wup")
+    log.info("WUP Explorer starting: %s (workspace %s, log %s)", " ".join(sys.argv[1:]) or "browser", ws_dir, logs)
+
     from aorc_tools.explorer.server import build
     from aorc_tools.explorer.workspace import Workspace
 
     ws = Workspace(ws_dir)
+    n_tmp = ws.cleanup_tmp()
+    if n_tmp:
+        print(f"Removed {n_tmp} half-written file(s) left by an earlier interruption.")
     if ws.relocated:
         print(f"Workspace moved here - {ws.relocated} catalog paths now point to {ws.root}")
+    sf = sync_folder(ws.root)
+    if sf:
+        print(f"WARNING: the workspace is inside a {sf} folder ({ws.root}).\n"
+              "  Cloud sync locks and rewrites files while they are being written, which can corrupt the catalog.\n"
+              "  Better: use a local folder (e.g. C:\\WUP\\WUP_Explorer_data) with --workspace, or pause syncing.")
+        log.warning("workspace inside a %s folder", sf)
+    free = disk_free_gb(ws.root)
+    if free < float(ws.settings.get("min_free_gb", 5.0)) * 2:
+        print(f"WARNING: only {free:.1f} GB free on the workspace drive; the full record needs roughly 60-130 GB of AORC "
+              "inputs plus ~30 GB of results.")
     source = args.source
     offline = bool(args.offline)
     local_aorc = any((ws.root / "inputs" / "aorc").rglob("*.nc")) if (ws.root / "inputs" / "aorc").exists() else False
-    if source == "auto":
+    unattended = headless or args.fire_checks
+    if source == "auto" and unattended and not offline:
+        # never compute a synthetic record by accident: real AORC, or stop
+        print("Checking the NOAA AORC archive on S3 ...", flush=True)
+        ok = False
+        for attempt in range(3):
+            if s3_reachable():
+                ok = True
+                break
+            if attempt < 2:
+                print(f"  not reachable yet; trying again in {S3_PROBE_WAIT} s ...", flush=True)
+                time.sleep(S3_PROBE_WAIT)
+        if ok:
+            source = "aorc"
+        elif local_aorc:
+            source = "aorc"
+            print("  AORC on S3 is not reachable right now. Using the local AORC store first; hours it does not have are\n"
+                  "  fetched from S3 with automatic retries (jobs wait and resume when the connection is back).")
+        else:
+            print("\nNOAA AORC on S3 cannot be reached and there is no local AORC store, so there is no real weather to\n"
+                  "compute from. Check the internet connection (Run_Self_Test.bat), or pass --source synthetic for demo data.\n",
+                  file=sys.stderr)
+            return 4
+    elif source == "auto":
         if offline:
             source = "aorc"
         else:
@@ -148,7 +236,7 @@ def main(argv=None):
                 source = "synthetic"
                 print("  AORC is not reachable from this computer right now - starting with SYNTHETIC demo weather.\n"
                       "  (Switch to the real archive from the source badge once you are online.)")
-    elif source == "aorc" and local_aorc and not offline and not s3_reachable(8.0):
+    elif source == "aorc" and local_aorc and not offline and not unattended and not s3_reachable(8.0):
         offline = True
         print("  AORC on S3 is not reachable - using the LOCAL AORC store (offline mode).")
     ws.save_settings(source=source, offline=offline)
@@ -172,12 +260,15 @@ def main(argv=None):
     print("=" * 64 + "\n", flush=True)
     if not args.no_browser:
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+    lock.update(url=url)
+    app.extensions["wup"].setdefault("on_exit", []).append(lock.release)
     try:
         app.run(host=args.host, port=args.port, threaded=True, use_reloader=False)
     except KeyboardInterrupt:
         pass
     finally:
         app.extensions["wup"]["jobs"].stop()
+        app.extensions["wup"]["tasks"].stop()
     return 0
 
 
@@ -253,7 +344,7 @@ def run_headless(ws_dir, source, static_dir, output, args) -> int:
             r = t["result"]
             print(f"    downloaded {r['downloaded']}, already present {r['already_present']}, errors {r['n_errors']}; "
                   f"store {r['store_bytes'] / 1e9:.2f} GB ({r['store_percent']} % of the domain)")
-    if args.ingest_ndvi or (args.full_record and not (Path(static_dir) / "FPI_Input_Static.nc").exists()):
+    if args.ingest_ndvi or (args.full_record and not args.no_ndvi):   # finished years are skipped quickly
         yrs = args.ingest_ndvi or f"2000-{min(d1.year, time.localtime().tm_year)}"
         a, _, b = yrs.partition("-")
         print(f"\n[2] NDVI ingest ({args.ndvi_product} via {args.ndvi_backend}, {a}-{b or a}) into {static_dir}")
@@ -264,43 +355,83 @@ def run_headless(ws_dir, source, static_dir, output, args) -> int:
             body["password"] = os.environ.get("EARTHDATA_PASSWORD") or getpass.getpass("    Earthdata password: ")
         run_task(c.post("/api/data/ndvi", json=body))
     period = args.compute or ([d0.isoformat(), d1.isoformat()] if args.full_record else None)
-    if period:
-        print(f"\n[3] Compute {period[0]} -> {period[1]}, all bricks (saved chunks are skipped)")
-        bricks = [b["key"] for b in grid.bricks()]
-        jid = jobs.create(f"record {period[0][:10]}→{period[1][:10]}", src_name, cfg, bricks, period[0], period[1])
+    bricks = [b["key"] for b in grid.bricks()]
+
+    def compute(label):
+        print(f"\n[{label}] Compute {period[0][:13]} -> {period[1][:13]}, all bricks (saved chunks are skipped; any chunk "
+              "that no longer continues from the one before it is recomputed)")
+        name = f"record {period[0][:10]}→{period[1][:10]}"
+        same = [j for j in jobs.list() if j["name"] == name and j["source"] == src_name and j["config_id"] == cfg.id
+                and sorted(j["bricks"]) == bricks and j["status"] != "running"]
+        if same:
+            jid = same[0]["id"]
+            jobs.resume(jid)
+        else:
+            jid = jobs.create(name, src_name, cfg, bricks, period[0], period[1])
         t0 = time.time()
         stop = threading.Event()
 
         def watch():
             while not stop.wait(15):
                 j_ = jobs.get(jid) or {}
+                if j_.get("status") != "running":
+                    continue
                 el = time.time() - t0
                 d_, n_ = j_.get("tasks_done", 0), max(j_.get("tasks_total", 1), 1)
                 eta = el / d_ * (n_ - d_) if d_ else float("nan")
                 _bar(d_, n_, f"{d_}/{n_} brick-chunks · {el / 3600:.1f} h elapsed · ~{eta / 3600:.1f} h left")
         threading.Thread(target=watch, daemon=True).start()
+
+        def on_wait(j_, wait):
+            print(f"\n    problem: {j_['error'][:300]}\n    retrying automatically in {wait / 60:.0f} min "
+                  "(close this window to stop; running the same command later resumes)", flush=True)
         try:
-            jobs.run_now(jid)
+            j = jobs.run_until_settled(jid, on_wait=on_wait)
         finally:
             stop.set()
-        j = jobs.get(jid)
         print()
         print(f"    job #{jid}: {j['status']} - {j['tasks_done']}/{j['tasks_total']} brick-chunks in {time.time() - t0:.0f} s"
               + (f" - {j['error']}" if j.get("error") else ""))
-        if j["status"] != "done":
-            rc = 1
-    if args.verify or args.full_record:
-        mode = args.verify or "full"
-        print(f"\n[4] Verify the saved record ({mode})")
+        return j["status"] == "done"
+
+    def verify_step(label, mode):
+        print(f"\n[{label}] Verify the saved record ({mode})")
         t = run_task(c.post("/api/data/verify", json={"config": cfg.as_dict(), "source": src_name, "mode": mode}))
+        if not (t and t.get("result")):
+            return None
+        r = t["result"]
+        print(f"    OVERALL {r['overall']} · completeness {r['completeness_percent']} % · {r['files_checked']} files opened")
+        for k, v in r["checks"].items():
+            print(f"      {k:<22} {v}")
+        for p in r["problems"][:10]:
+            print("      -", p)
+        print(f"    report: {r['html']}")
+        return r
+
+    def repair_step(label):
+        print(f"\n[{label}] Repair: set aside unreadable files so they are recomputed")
+        t = run_task(c.post("/api/data/repair", json={"config": cfg.as_dict(), "source": src_name}))
         if t and t.get("result"):
             r = t["result"]
-            print(f"    OVERALL {r['overall']} · completeness {r['completeness_percent']} % · {r['files_checked']} files opened")
-            for k, v in r["checks"].items():
-                print(f"      {k:<22} {v}")
-            for p in r["problems"][:10]:
-                print("      -", p)
-            print(f"    report: {r['html']}")
+            print(f"    {r['quarantined_files']} file(s) moved to {ws.root / 'quarantine'}, {r['catalog_rows_dropped']} catalog "
+                  "row(s) dropped")
+            return r
+        return None
+
+    if period:
+        if not compute("3"):
+            rc = 1
+    if args.repair:
+        r = repair_step("R")
+        if r and r["catalog_rows_dropped"] and period is None:
+            print("    Run --full-record (or --compute) to recompute them.")
+    if args.verify or args.full_record:
+        r = verify_step("4", args.verify or "full")
+        if r is not None and args.full_record and r["checks"].get("readable_files") == "FAIL":
+            repair_step("4b")                              # damaged files: set aside, recompute, verify again
+            if compute("4c"):
+                r = verify_step("4d", "full")
+        if r is not None:
             rc = rc or (0 if r["overall"] != "FAIL" else 2)
     if args.bundle:
         print(f"\n[5] Research bundle -> {args.bundle}")

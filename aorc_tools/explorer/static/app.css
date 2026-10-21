@@ -116,7 +116,7 @@ table.t .r{color:var(--ink-3);font-size:11px}
 .job{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:8px 0;background:var(--panel-2)}
 .job .top{display:flex;gap:8px;align-items:center}
 .job .st{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:1px 6px;border-radius:4px;background:var(--panel-3)}
-.job .st.running{background:#15253a;color:#9ec5f4}.job .st.done{background:#153b28;color:#8fdcb2}.job .st.error{background:#3b1717;color:#f2a3a3}.job .st.paused{background:#3b2a15;color:#f0c27a}
+.job .st.running{background:#15253a;color:#9ec5f4}.job .st.retrying{background:#3b2a15;color:#f0c27a}.job .st.done{background:#153b28;color:#8fdcb2}.job .st.error{background:#3b1717;color:#f2a3a3}.job .st.paused{background:#3b2a15;color:#f0c27a}
 .list{margin:4px 0}
 .list .it{display:flex;gap:6px;align-items:center;padding:4px 0;border-bottom:1px solid var(--line)}
 .list .it .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

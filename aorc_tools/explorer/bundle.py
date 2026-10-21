@@ -38,7 +38,8 @@ STORED_EXT = {".nc", ".nc4", ".zip", ".gz", ".zst", ".png", ".jpg", ".tif", ".ti
 SKIP_DIRS = {"__pycache__", ".pytest_cache", ".git", ".venv", "cache", "bundles", "downloads", "node_modules"}
 SKIP_SUFFIX = (".tmp", ".pyc", ".lock", "-wal", "-shm")
 APP_TOP = ["README.md", "USAGE.md", "CLAUDE.md", "setup.py", "requirements.txt", "requirements-explorer.txt",
-           "WUP_Explorer.bat", "WUP_Explorer.command", "wup_explorer.sh", "Run_Fire_Checks.bat", "Run_Full_Record.bat"]
+           "WUP_Explorer.bat", "WUP_Explorer.command", "wup_explorer.sh", "Run_Fire_Checks.bat", "Run_Full_Record.bat",
+           "Run_Self_Test.bat", "requirements-tested.txt"]
 APP_DIRS = ["aorc_tools", "docs", "packaging", "scripts", "tests"]
 PARTS = {
     "app": "Program (source snapshot, launchers, docs; plus WUP_Explorer.exe when packaged)",
@@ -246,46 +247,62 @@ def make(ws, ctx, store, grid, out_path: Path, parts=None, results_filter=None, 
     done = 0
     manifest_files = []
     tmp = out_path.with_name(out_path.name + ".tmp")
-    with tempfile.TemporaryDirectory() as td:
-        db_copy = Path(td) / "workspace.db"
-        if parts is None or "catalog" in parts:
-            src_db = sqlite3.connect(ws.db_path)
-            dst_db = sqlite3.connect(db_copy)
-            with dst_db:
-                src_db.backup(dst_db)                     # consistent snapshot even while jobs write
-            src_db.close()
-            dst_db.close()
-            items.append(("WUP_Explorer_data/workspace.db", db_copy))
-        with zipfile.ZipFile(tmp, "w", allowZip64=True) as z:
-            for arc, p in items:
-                comp = zipfile.ZIP_STORED if p.suffix.lower() in STORED_EXT else zipfile.ZIP_DEFLATED
-                h = hashlib.sha256()
-                zi = zipfile.ZipInfo(f"{top}/{arc}", date_time=datetime.fromtimestamp(p.stat().st_mtime).timetuple()[:6])
-                zi.compress_type = comp
-                zi.external_attr = (0o755 if p.suffix in (".sh", ".command", ".exe") else 0o644) << 16
-                size = p.stat().st_size
-                with open(p, "rb") as f, z.open(zi, "w", force_zip64=size > 2 ** 31) as w:
-                    while True:
-                        b = f.read(4 * 1024 * 1024)
-                        if not b:
-                            break
-                        h.update(b)
-                        w.write(b)
-                manifest_files.append({"path": arc, "bytes": size, "sha256": h.hexdigest()})
-                done += size
-                if progress:
-                    progress(done, max(total, 1), arc)
-            prov = provenance(ws, ctx, store, grid)
-            manifest = {"bundle": top, "format": 1, "provenance": prov,
-                        "parts": {k: {kk: vv for kk, vv in v.items()} for k, v in pl["parts"].items()},
-                        "files": manifest_files}
-            z.writestr(f"{top}/MANIFEST.json", json.dumps(manifest, indent=1, default=str), compress_type=zipfile.ZIP_DEFLATED)
-            parts_txt = "\n".join(f"  - {v['label']}: {_human(v['bytes'])} ({v['files']} files)" for v in pl["parts"].values())
-            z.writestr(f"{top}/README.txt", README.format(created=prov["created"], total=_human(sum(f["bytes"] for f in manifest_files)),
-                                                         n=len(manifest_files), parts=parts_txt), compress_type=zipfile.ZIP_DEFLATED)
-            if any(a.startswith("app/") for a, _ in items):
-                z.writestr(f"{top}/app/APP_VERSION.txt", (prov.get("app_commit") or "unknown") + "\n")
-    os.replace(tmp, out_path)
+    from aorc_tools.explorer.runtime import disk_free_gb, fsync_file, replace_file
+    need = total * 1.02 / 1024 ** 3 + 0.5
+    if disk_free_gb(out_path.parent) < need:
+        raise RuntimeError(f"not enough free space for the bundle at {out_path.parent}: needs about {need:.1f} GB, "
+                           f"{disk_free_gb(out_path.parent):.1f} GB free")
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            db_copy = Path(td) / "workspace.db"
+            if parts is None or "catalog" in parts:
+                src_db = sqlite3.connect(ws.db_path)
+                dst_db = sqlite3.connect(db_copy)
+                with dst_db:
+                    src_db.backup(dst_db)                     # consistent snapshot even while jobs write
+                src_db.close()
+                dst_db.close()
+                items.append(("WUP_Explorer_data/workspace.db", db_copy))
+            with zipfile.ZipFile(tmp, "w", allowZip64=True) as z:
+                skipped = []
+                for arc, p in items:
+                    comp = zipfile.ZIP_STORED if p.suffix.lower() in STORED_EXT else zipfile.ZIP_DEFLATED
+                    h = hashlib.sha256()
+                    try:
+                        st = p.stat()
+                    except FileNotFoundError:               # removed meanwhile (e.g. a job replaced it): leave out
+                        skipped.append(arc)
+                        continue
+                    zi = zipfile.ZipInfo(f"{top}/{arc}", date_time=datetime.fromtimestamp(st.st_mtime).timetuple()[:6])
+                    zi.compress_type = comp
+                    zi.external_attr = (0o755 if p.suffix in (".sh", ".command", ".exe") else 0o644) << 16
+                    size = st.st_size
+                    with open(p, "rb") as f, z.open(zi, "w", force_zip64=size > 2 ** 31) as w:
+                        while True:
+                            b = f.read(4 * 1024 * 1024)
+                            if not b:
+                                break
+                            h.update(b)
+                            w.write(b)
+                    manifest_files.append({"path": arc, "bytes": size, "sha256": h.hexdigest()})
+                    done += size
+                    if progress:
+                        progress(done, max(total, 1), arc)
+                prov = provenance(ws, ctx, store, grid)
+                manifest = {"bundle": top, "format": 1, "provenance": prov, "skipped_while_bundling": skipped,
+                            "parts": {k: {kk: vv for kk, vv in v.items()} for k, v in pl["parts"].items()},
+                            "files": manifest_files}
+                z.writestr(f"{top}/MANIFEST.json", json.dumps(manifest, indent=1, default=str), compress_type=zipfile.ZIP_DEFLATED)
+                parts_txt = "\n".join(f"  - {v['label']}: {_human(v['bytes'])} ({v['files']} files)" for v in pl["parts"].values())
+                z.writestr(f"{top}/README.txt", README.format(created=prov["created"], total=_human(sum(f["bytes"] for f in manifest_files)),
+                                                             n=len(manifest_files), parts=parts_txt), compress_type=zipfile.ZIP_DEFLATED)
+                if any(a.startswith("app/") for a, _ in items):
+                    z.writestr(f"{top}/app/APP_VERSION.txt", (prov.get("app_commit") or "unknown") + "\n")
+        fsync_file(tmp)
+        replace_file(tmp, out_path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)             # never leave a many-GB half bundle behind
+        raise
     return {"path": str(out_path), "bytes": out_path.stat().st_size, "files": len(manifest_files),
             "uncompressed_bytes": int(sum(f["bytes"] for f in manifest_files)), "parts": pl["parts"], "top": top}
 

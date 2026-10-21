@@ -38,6 +38,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from aorc_tools.explorer.hdf import HDF_LOCK, open_dataset
+from aorc_tools.explorer.runtime import fsync_file
+from aorc_tools.explorer.runtime import replace_file as _replace
 from aorc_tools.explorer.workspace import now_iso
 
 logger = logging.getLogger(__name__)
@@ -216,7 +219,7 @@ def write_year(static_dir: Path, acc: YearAccumulator, backend: str) -> Path:
         g[:, cells.y, cells.x] = q
         return g
 
-    with netCDF4.Dataset(tmp, "w", format="NETCDF4") as ds:
+    with HDF_LOCK, netCDF4.Dataset(tmp, "w", format="NETCDF4") as ds:
         ds.createDimension("time", len(days))
         ds.createDimension("composite", len(starts))
         ds.createDimension("latitude", cells.ny)
@@ -242,7 +245,8 @@ def write_year(static_dir: Path, acc: YearAccumulator, backend: str) -> Path:
                          "at the cell centre (AORC 1/120 deg grid)")
         ds.sources_json = json.dumps(sorted(set(acc.sources))[:400])
         ds.history = f"{datetime.now().isoformat(timespec='seconds')} written by WUP Grid Explorer NDVI ingest"
-    os.replace(tmp, path)
+    fsync_file(tmp)
+    _replace(tmp, path)
     return path
 
 
@@ -262,7 +266,7 @@ def build_static(static_dir: Path, cells: CellGrid, fuel_models, products=("MOD1
             continue
         vals = []
         for f in files:
-            with netCDF4.Dataset(f) as ds:
+            with HDF_LOCK, netCDF4.Dataset(f) as ds:
                 v = ds["ND_composite"]; v.set_auto_maskandscale(False)
                 a = np.asarray(v[:])[:, cells.y, cells.x].astype(np.float64)
                 vals.append(np.where(a == FILL, np.nan, a * SCALE))
@@ -280,8 +284,13 @@ def build_static(static_dir: Path, cells: CellGrid, fuel_models, products=("MOD1
     load = fuel_loadings(np.asarray(fuel_models, dtype=object))
     path = static_dir / "FPI_Input_Static.nc"
     static_dir.mkdir(parents=True, exist_ok=True)
+    new_arrays = {"ND_min": lo, "ND_max": hi, "LLfm": load["llfm"], "DLfm": load["dlfm"], "MXd": load["mxd"]}
+    if _same_grids(path, cells, new_arrays):          # unchanged: keep the file (and its date), so saved FPI stays valid
+        clim = build_doy_climatology(static_dir, cells, products)
+        return {"path": str(path), "cells_by_product": used, "years": sorted(years), "unchanged": True,
+                "cells_without_envelope": int((~np.isfinite(lo)).sum()), "doy_climatology": clim}
     tmp = path.with_suffix(".tmp")
-    with netCDF4.Dataset(tmp, "w", format="NETCDF4") as ds:
+    with HDF_LOCK, netCDF4.Dataset(tmp, "w", format="NETCDF4") as ds:
         ds.createDimension("latitude", cells.ny)
         ds.createDimension("longitude", cells.nx)
         la = ds.createVariable("latitude", "f8", ("latitude",)); la.units = "degrees_north"; la[:] = cells.lat
@@ -297,10 +306,30 @@ def build_static(static_dir: Path, cells: CellGrid, fuel_models, products=("MOD1
         ds.envelope = "1st/99th percentile" if robust else "minimum/maximum"
         ds.years = json.dumps(sorted(years))
         ds.history = f"{datetime.now().isoformat(timespec='seconds')} written by WUP Grid Explorer NDVI ingest"
-    os.replace(tmp, path)
+    fsync_file(tmp)
+    _replace(tmp, path)
     clim = build_doy_climatology(static_dir, cells, products)
     return {"path": str(path), "cells_by_product": used, "years": sorted(years),
             "cells_without_envelope": int((~np.isfinite(lo)).sum()), "doy_climatology": clim}
+
+
+def _same_grids(path, cells, arrays) -> bool:
+    """Does the existing NetCDF hold exactly these per-cell values (float32)?"""
+    import netCDF4
+    if not Path(path).exists():
+        return False
+    try:
+        with HDF_LOCK, netCDF4.Dataset(path) as ds:
+            for name, arr in arrays.items():
+                if name not in ds.variables:
+                    return False
+                ds[name].set_auto_maskandscale(False)
+                old = np.asarray(ds[name][:])[cells.y, cells.x]
+                if not np.array_equal(old.astype(np.float32), np.asarray(arr, dtype=np.float32), equal_nan=True):
+                    return False
+        return True
+    except Exception:
+        return False
 
 
 def build_doy_climatology(static_dir: Path, cells: CellGrid, products=("MOD13Q1", "MOD13A1", "MOD13A2")):
@@ -314,7 +343,7 @@ def build_doy_climatology(static_dir: Path, cells: CellGrid, products=("MOD13Q1"
     years = set()
     for p in products:
         for f in sorted((static_dir / "ndvi" / PRODUCT_DIR[p]).glob("FPI_Input_*.nc")):
-            with netCDF4.Dataset(f) as ds:
+            with HDF_LOCK, netCDF4.Dataset(f) as ds:
                 v = ds["ND0"]; v.set_auto_maskandscale(False)
                 a = np.asarray(v[:])[:, cells.y, cells.x].astype(np.float64)
                 a = np.where(a == FILL, np.nan, a * SCALE)
@@ -333,8 +362,17 @@ def build_doy_climatology(static_dir: Path, cells: CellGrid, products=("MOD13Q1"
     m[365] = np.where(np.isfinite(m[365]), m[365], m[364])          # day 366 from day 365 when no leap years
     out = static_dir / "ndvi" / "ndvi_doy_climatology.nc"
     out.parent.mkdir(parents=True, exist_ok=True)
+    packed = np.where(np.isfinite(m), np.round(m / SCALE), FILL).astype(np.int16)
+    if out.exists():                                    # unchanged: keep the file (saved FPI stays valid)
+        try:
+            with HDF_LOCK, netCDF4.Dataset(out) as ds:
+                ds["ND_clim"].set_auto_maskandscale(False)
+                if np.array_equal(np.asarray(ds["ND_clim"][:])[:, cells.y, cells.x], packed):
+                    return {"path": str(out), "years": sorted(years), "unchanged": True}
+        except Exception:                               # noqa: BLE001
+            pass
     tmp = out.with_suffix(".tmp")
-    with netCDF4.Dataset(tmp, "w", format="NETCDF4") as ds:
+    with HDF_LOCK, netCDF4.Dataset(tmp, "w", format="NETCDF4") as ds:
         ds.createDimension("doy", 366)
         ds.createDimension("latitude", cells.ny)
         ds.createDimension("longitude", cells.nx)
@@ -342,7 +380,7 @@ def build_doy_climatology(static_dir: Path, cells: CellGrid, products=("MOD13Q1"
         la = ds.createVariable("latitude", "f8", ("latitude",)); la.units = "degrees_north"; la[:] = cells.lat
         lo = ds.createVariable("longitude", "f8", ("longitude",)); lo.units = "degrees_east"; lo[:] = cells.lon
         g = np.full((366, cells.ny, cells.nx), FILL, dtype=np.int16)
-        g[:, cells.y, cells.x] = np.where(np.isfinite(m), np.round(m / SCALE), FILL).astype(np.int16)
+        g[:, cells.y, cells.x] = packed
         v = ds.createVariable("ND_clim", "i2", ("doy", "latitude", "longitude"), fill_value=FILL,
                               chunksizes=(31, min(64, cells.ny), min(64, cells.nx)), **COMP)
         v.scale_factor, v.add_offset = np.float32(SCALE), np.float32(0)
@@ -350,7 +388,8 @@ def build_doy_climatology(static_dir: Path, cells: CellGrid, products=("MOD13Q1"
         v[:] = g
         v.long_name = "mean daily NDVI for the day of year"
         ds.years = json.dumps(sorted(years))
-    os.replace(tmp, out)
+    fsync_file(tmp)
+    _replace(tmp, out)
     return {"path": str(out), "years": sorted(years)}
 
 
@@ -422,21 +461,37 @@ class PlanetaryComputerMODIS:
         return None
 
     def ingest_year(self, acc: YearAccumulator, progress=None):
-        items = self.items(acc.year, acc.cells.bbox)
+        from aorc_tools.explorer.runtime import retry
+        items = retry(lambda: self.items(acc.year, acc.cells.bbox), what=f"Planetary Computer search {acc.year}")
         if not items:
             raise RuntimeError(f"no {self.product} items for {acc.year} over the WUP")
         for i, it in enumerate(items):
-            nd_href = self._asset(it, "16_days_ndvi")
-            rel_href = self._asset(it, "pixel_reliability")
-            if nd_href is None:
+            box = {"it": it}
+
+            def resign(attempt, exc, box=box):                # signed URLs expire during long ingests
+                if self._items_fn is None:
+                    try:
+                        import planetary_computer
+                        box["it"] = planetary_computer.sign(box["it"])
+                    except Exception as e:                  # noqa: BLE001
+                        logger.warning("re-signing %s failed: %s", getattr(box["it"], "id", "?"), e)
+
+            def read_both(box=box):
+                nd_href = self._asset(box["it"], "16_days_ndvi")
+                rel_href = self._asset(box["it"], "pixel_reliability")
+                if nd_href is None:
+                    return None
+                got = _read_window(nd_href, acc.cells.bbox, sinusoidal=True)
+                if got is None:
+                    return None
+                return got, (_read_window(rel_href, acc.cells.bbox, sinusoidal=True)[0] if rel_href else None)
+
+            res = retry(read_both, what=f"MODIS {getattr(it, 'id', '')}", on_retry=resign)
+            if res is None:
                 continue
             t = pd.Timestamp(it.properties.get("start_datetime") or it.datetime)
             start = t.tz_convert(None) if t.tzinfo else t
-            got = _read_window(nd_href, acc.cells.bbox, sinusoidal=True)
-            if got is None:
-                continue
-            nd, lat, lon = got
-            rel = _read_window(rel_href, acc.cells.bbox, sinusoidal=True)[0] if rel_href else None
+            (nd, lat, lon), rel = res
             acc.add_fine(start, lat, lon, modis_qa_ndvi(nd, rel), source=getattr(it, "id", ""))
             if progress:
                 progress(i + 1, len(items), f"{acc.year} {getattr(it, 'id', '')}")
@@ -481,32 +536,61 @@ class AppEEARSMODIS:
                 "params": {"dates": [{"startDate": f"01-01-{year}", "endDate": f"12-31-{year}"}],
                            "layers": [{"product": prod, "layer": nd}, {"product": prod, "layer": rel}],
                            "geo": geo, "output": {"format": {"type": "netcdf4"}, "projection": "geographic"}}}
-        hdr = {"Authorization": f"Bearer {self._token()}"}
-        r = self.session.post(f"{self.API}/task", json=task, headers=hdr, timeout=60)
-        r.raise_for_status()
-        tid = r.json()["task_id"]
+        from aorc_tools.explorer.runtime import retry
+        hdr = {"Authorization": f"Bearer {retry(self._token, what='Earthdata login')}"}
+        self.download_dir.mkdir(parents=True, exist_ok=True)
+        ledger = self.download_dir / "appeears_tasks.json"     # resume a submitted request after a restart
+        known = json.loads(ledger.read_text()) if ledger.exists() else {}
+        key = f"{self.product}_{year}"
+        tid = known.get(key)
+        if tid:
+            st = retry(lambda: self.session.get(f"{self.API}/task/{tid}", headers=hdr, timeout=60).json(),
+                       what="AppEEARS status")
+            if st.get("status") in ("error", "expired", None):
+                tid = None
+        if not tid:
+            def submit():
+                r = self.session.post(f"{self.API}/task", json=task, headers=hdr, timeout=60)
+                r.raise_for_status()
+                return r.json()["task_id"]
+            tid = retry(submit, what="AppEEARS submit")
+            known[key] = tid
+            ledger.write_text(json.dumps(known, indent=1))
         t0 = _time.time()
         while True:
-            s = self.session.get(f"{self.API}/task/{tid}", headers=hdr, timeout=60).json()
+            s = retry(lambda: self.session.get(f"{self.API}/task/{tid}", headers=hdr, timeout=60).json(),
+                      waits=(30, 120, 300, 600), what="AppEEARS status")
             if s.get("status") == "done":
                 break
             if s.get("status") in ("error", "expired"):
+                known.pop(key, None)
+                ledger.write_text(json.dumps(known, indent=1))
                 raise RuntimeError(f"AppEEARS task {tid} {s.get('status')}")
             if _time.time() - t0 > timeout_s:
-                raise TimeoutError(f"AppEEARS task {tid} still {s.get('status')} after {timeout_s} s")
+                raise TimeoutError(f"AppEEARS task {tid} still {s.get('status')} after {timeout_s} s "
+                                   "(it keeps running at NASA; run the ingest again later to pick it up)")
             _time.sleep(poll_s)
-        files = self.session.get(f"{self.API}/bundle/{tid}", headers=hdr, timeout=60).json()["files"]
+        files = retry(lambda: self.session.get(f"{self.API}/bundle/{tid}", headers=hdr, timeout=60).json()["files"],
+                      what="AppEEARS file list")
         out = []
-        self.download_dir.mkdir(parents=True, exist_ok=True)
         for f in files:
             if not f["file_name"].endswith(".nc"):
                 continue
             dst = self.download_dir / Path(f["file_name"]).name
-            with self.session.get(f"{self.API}/bundle/{tid}/{f['file_id']}", headers=hdr, stream=True, timeout=600) as resp:
-                resp.raise_for_status()
-                with open(dst, "wb") as fh:
-                    for chunk in resp.iter_content(1 << 20):
-                        fh.write(chunk)
+            if dst.exists() and f.get("file_size") and dst.stat().st_size == int(f["file_size"]):
+                out.append(dst)
+                continue
+
+            def download(f=f, dst=dst):
+                tmp = dst.with_suffix(dst.suffix + ".part")
+                with self.session.get(f"{self.API}/bundle/{tid}/{f['file_id']}", headers=hdr, stream=True,
+                                      timeout=600) as resp:
+                    resp.raise_for_status()
+                    with open(tmp, "wb") as fh:
+                        for chunk in resp.iter_content(1 << 20):
+                            fh.write(chunk)
+                os.replace(tmp, dst)
+            retry(download, what=f"AppEEARS download {f['file_name']}")
             out.append(dst)
         return out
 
@@ -514,7 +598,7 @@ class AppEEARSMODIS:
         """Process one AppEEARS NetCDF (variables named after the layers, dims time/lat/lon)."""
         import xarray as xr
         _, nd, rel = self.LAYERS[self.product]
-        with xr.open_dataset(path, mask_and_scale=False, decode_times=True) as ds:
+        with HDF_LOCK, open_dataset(path, mask_and_scale=False, decode_times=True) as ds:
             ndv = next(v for v in ds.data_vars if v.endswith(nd.lstrip("_")) or v == nd)
             relv = next((v for v in ds.data_vars if v.endswith(rel.lstrip("_")) or v == rel), None)
             lat, lon = ds["lat"].values, ds["lon"].values
@@ -644,7 +728,7 @@ class LocalRasters:
         for i, (d, f) in enumerate(fl):
             if f.suffix.lower() == ".nc":
                 import xarray as xr
-                with xr.open_dataset(f) as ds:
+                with HDF_LOCK, open_dataset(f) as ds:
                     v = next(n for n in ds.data_vars if "ndvi" in n.lower())
                     a = np.squeeze(ds[v].values).astype(np.float64)
                     lat = ds[[c for c in ds.coords if c.lower().startswith("lat")][0]].values
@@ -682,6 +766,18 @@ def make_backend(name, product="MOD13Q1", **kw):
     raise ValueError(f"unknown NDVI backend {name}")
 
 
+def _year_ok(path, year) -> bool:
+    """A finished past year with (nearly) all its 23 composites; the current year is always refreshed."""
+    import netCDF4
+    if int(year) >= datetime.now().year:
+        return False
+    try:
+        with HDF_LOCK, netCDF4.Dataset(path) as ds:
+            return ds.dimensions["composite"].size >= 20
+    except Exception:
+        return False
+
+
 def run_ingest(grid, static_dir, backend_name, product, years, fuel_models, progress=None, build_envelope=True, **kw):
     """Ingest years with one backend, then rebuild the static envelope. Returns a summary."""
     cells = CellGrid(grid)
@@ -691,6 +787,12 @@ def run_ingest(grid, static_dir, backend_name, product, years, fuel_models, prog
     n = len(years)
     for yi, year in enumerate(years):
         acc = YearAccumulator(cells, int(year), prod)
+        done_path = Path(static_dir) / "ndvi" / PRODUCT_DIR[prod] / f"FPI_Input_{int(year)}.nc"
+        if done_path.exists() and not kw.get("force") and _year_ok(done_path, year):
+            written.append({"year": int(year), "path": str(done_path), "skipped": "already ingested"})
+            if progress:
+                progress(yi + 1, n, f"{year} already ingested")
+            continue
         try:
             be.ingest_year(acc, progress=(lambda d, t, note, yi=yi: progress(yi + d / max(t, 1), n, note)) if progress else None)
             starts, vals = acc.composites()

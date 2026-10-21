@@ -84,6 +84,23 @@ class NDVIProvider:
     def available(self):
         return self.static_path.exists()
 
+    def signature(self, year) -> str:
+        """Fingerprint of every NDVI file FPI would read for ``year`` (size + modification time). A saved chunk whose
+        fingerprint differs (NDVI ingested or re-ingested since) is recomputed."""
+        import hashlib
+        files = [self.static_path] + [self.dir / "ndvi" / p / f"FPI_Input_{year}.nc" for p, _ in NDVI_PRODUCTS]
+        files.append(self.dir / "ndvi" / f"FPI_Input_{year}.nc")
+        if self.allow_climatology:
+            files += [self.dir / "ndvi" / "AVHRR_CDR" / f"FPI_Input_{year}.nc", self.dir / "ndvi" / "ndvi_doy_climatology.nc"]
+        parts = []
+        for f in files:
+            try:
+                st = f.stat()
+                parts.append(f"{f.parent.name}/{f.name}:{st.st_size}:{st.st_mtime_ns}")
+            except OSError:
+                continue
+        return hashlib.sha1("|".join(parts).encode()).hexdigest()[:12] if parts else "none"
+
     def describe(self):
         prods = {p: sorted(x.stem.split("_")[-1] for x in (self.dir / "ndvi" / p).glob("FPI_Input_*.nc"))
                  for p in [q for q, _ in NDVI_PRODUCTS] + ["AVHRR_CDR"] if (self.dir / "ndvi" / p).exists()}
@@ -100,11 +117,12 @@ class NDVIProvider:
         if not self.available:
             return None
         import xarray as xr
+        from aorc_tools.explorer.hdf import HDF_LOCK, open_dataset
         rows = grid.rows_for(point_ids)
         lats, lons = grid.points.latitude.values[rows], grid.points.longitude.values[rows]
-        st = xr.open_dataset(self.static_path)
-        out = {k: self._pick(st[v], lats, lons).values.astype(float)
-               for k, v in [("nd_min", "ND_min"), ("nd_max", "ND_max"), ("llfm", "LLfm"), ("dlfm", "DLfm"), ("mxd", "MXd")]}
+        with HDF_LOCK, open_dataset(self.static_path) as st:
+            out = {k: self._pick(st[v], lats, lons).values.astype(float)
+                   for k, v in [("nd_min", "ND_min"), ("nd_max", "ND_max"), ("llfm", "LLfm"), ("dlfm", "DLfm"), ("mxd", "MXd")]}
         days = times.normalize()
         udays = days.unique()
         nd_day = np.full((len(udays), len(rows)), np.nan)
@@ -118,8 +136,8 @@ class NDVIProvider:
                 f = folder / f"FPI_Input_{year}.nc"
                 if not f.exists():
                     continue
-                ds = xr.open_dataset(f)
-                vals = self._pick(ds["ND0"].sel(time=udays[ysel], method="nearest"), lats, lons).values
+                with HDF_LOCK, open_dataset(f) as ds:
+                    vals = self._pick(ds["ND0"].sel(time=udays[ysel], method="nearest"), lats, lons).values
                 blk = nd_day[ysel]
                 era_ok = (udays[ysel] >= MODIS_START) if tier < 3 else np.ones(int(ysel.sum()), dtype=bool)
                 take = np.isnan(blk) & np.isfinite(vals) & era_ok[:, None]
@@ -128,8 +146,8 @@ class NDVIProvider:
                 tb = tier_day[ysel]; tb[take] = tier; tier_day[ysel] = tb
         clim = self.dir / "ndvi" / "ndvi_doy_climatology.nc"
         if self.allow_climatology and clim.exists() and np.isnan(nd_day).any():
-            ds = xr.open_dataset(clim)
-            vals = self._pick(ds["ND_clim"].sel(doy=xr.DataArray(udays.dayofyear.values, dims="t")), lats, lons).values
+            with HDF_LOCK, open_dataset(clim) as ds:
+                vals = self._pick(ds["ND_clim"].sel(doy=xr.DataArray(udays.dayofyear.values, dims="t")), lats, lons).values
             take = np.isnan(nd_day) & np.isfinite(vals)
             nd_day[take] = vals[take]
             tier_day[take] = 4

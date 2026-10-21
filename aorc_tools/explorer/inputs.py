@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS input_chunks (
     dataset TEXT, year INTEGER, k INTEGER, brick TEXT, n_hours INTEGER, t_start TEXT, t_end TEXT,
     path TEXT, created TEXT, meta TEXT, PRIMARY KEY (dataset, year, k, brick));
 """
-LOCK = threading.RLock()
+from aorc_tools.explorer.hdf import HDF_LOCK as LOCK  # noqa: E402  (one lock for all HDF5 use)
 
 
 def pack(v, a):
@@ -107,6 +107,14 @@ class InputStore:
                           (self.dataset, int(year), int(k), brick_key)).fetchone()
         return bool(r) and Path(r["path"]).exists()
 
+    def quarantine(self, year, k, reason):
+        """Set a damaged chunk file aside and forget every brick in it (they are fetched again when needed)."""
+        path = self.path_for(year, k)
+        with LOCK:
+            self.ws.quarantine(path, "inputs", reason)
+            with self.ws.conn() as c:
+                c.execute("DELETE FROM input_chunks WHERE dataset=? AND year=? AND k=?", (self.dataset, int(year), int(k)))
+
     def inventory(self, domain_start=None, domain_end=None) -> dict:
         with self.ws.conn() as c:
             rows = c.execute("SELECT year, COUNT(*) AS n, SUM(n_hours) AS hours FROM input_chunks WHERE dataset=? "
@@ -147,19 +155,23 @@ class InputStore:
         times = pd.DatetimeIndex(times)
         nt = len(times)
         with LOCK:
+            data, bricks = None, {}
             if path.exists():
-                with netCDF4.Dataset(path) as ds:
-                    old_t = pd.to_datetime(np.asarray(ds["time"][:], dtype=np.int64), unit="h", origin=pd.Timestamp("1979-01-01"))
-                    if len(old_t) != nt or not (old_t == times).all():
-                        raise ValueError(f"input chunk {path.name} has different hours")
-                    data = {}
-                    for v in PACK:
-                        ds[v].set_auto_maskandscale(False)
-                        data[v] = np.asarray(ds[v][:])
-                    bricks = json.loads(getattr(ds, "bricks_json", "{}"))
-            else:
+                try:
+                    with netCDF4.Dataset(path) as ds:
+                        old_t = pd.to_datetime(np.asarray(ds["time"][:], dtype=np.int64), unit="h", origin=pd.Timestamp("1979-01-01"))
+                        if len(old_t) != nt or not (old_t == times).all():
+                            raise ValueError(f"input chunk {path.name} has different hours")
+                        data = {}
+                        for v in PACK:
+                            ds[v].set_auto_maskandscale(False)
+                            data[v] = np.asarray(ds[v][:])
+                        bricks = json.loads(getattr(ds, "bricks_json", "{}"))
+                except Exception as e:                  # damaged: keep it aside and start this chunk file afresh
+                    self.quarantine(year, k, f"unreadable while merging brick {brick_key}: {e}")
+                    data, bricks = None, {}
+            if data is None:
                 data = {v: np.full((nt, self.ny, self.nx), FILL, dtype=np.int16) for v in PACK}
-                bricks = {}
             for v in PACK:
                 if v in arrays:
                     blk = pack(v, arrays[v])
@@ -192,12 +204,14 @@ class InputStore:
                 ds.packing = ("int16 with scale_factor/add_offset; steps: 0.01 K, 1e-6 kg/kg, 1 Pa, 0.01 m/s, "
                               "0.01 mm, 0.1 W/m2. Cells farther than 3 cells from the study area are fill values.")
                 ds.history = f"{datetime.now().isoformat(timespec='seconds')} written by WUP Grid Explorer"
-            for _ in range(40):
-                try:
-                    os.replace(tmp, path)
-                    break
-                except PermissionError:
-                    _time.sleep(0.25)
+            from aorc_tools.explorer.runtime import fsync_file
+            from aorc_tools.explorer.store import _replace
+            fsync_file(tmp)
+            try:
+                _replace(tmp, path)
+            except OSError:
+                tmp.unlink(missing_ok=True)
+                raise
             with self.ws.conn() as c:
                 c.execute("INSERT OR REPLACE INTO input_chunks (dataset, year, k, brick, n_hours, t_start, t_end, path, created, meta) "
                           "VALUES (?,?,?,?,?,?,?,?,?,?)",

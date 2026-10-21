@@ -29,6 +29,30 @@ COMPANION papers. Deadline: July 1, 2026 (no resubmission).
   adapter (`datasets.py`: regcm=GLARM, cf, wrf, era5), full-record verifier (`verify.py`, `--verify`), research bundle
   (`bundle.py`, `--bundle`; zip + SHA-256 manifest; workspace relocates itself), headless `--full-record`,
   Data tab. Tests: `tests/test_data_pipeline.py`.
+  Robustness (2026-10-21, for day-long unattended runs on Wes's Windows 10 / 16 GB machine; USAGE.md "Long unattended
+  runs"):
+  - Concurrency and process safety:
+    - ONE process-wide HDF5 lock (`hdf.py`; the netCDF4 wheel's HDF5 is not thread-safe → segfaults).
+    - Workspace OS lock + logs/faulthandler (`runtime.py`).
+  - Retries:
+    - S3 read retries; job auto-retry with status `retrying`.
+    - Permanent errors stop: OfflineMissing, layout, NoDataYet, disk.
+    - Scheduler never dies; `run_until_settled` for headless runs.
+    - Unattended runs never fall back to synthetic weather (exit 4).
+  - Files:
+    - Atomic tmp+fsync+replace with Windows retries.
+    - tmp cleanup at start.
+    - Quarantine + `--repair`.
+  - Continuity: `chunk_state` = missing / stale / ok, via `prev_rowid` and a state comparison. NDVI-signature changes
+    → recompute.
+  - Limits and checks:
+    - AORC data-end clamp.
+    - Memory caps: workers ≤ RAM/6; live cap 2.5M cell-hours.
+    - Exact histogram climatology.
+    - Coverage cache.
+  - Server: Origin/CORS check and JSON errors.
+  - `--self-test` (`selftest.py`, `Run_Self_Test.bat`).
+  - Tests: `tests/test_robustness.py`.
 - `docs/future_glarm_plan.md` — futures with GLARM (GATED on a full-record PASS). Key facts: public GLARM-Proj1 has
   only daily lake temp/ice/T2m → need RegCM SRF fields from Xue's group; Yu et al. 2023 give NO weights (sensitivity,
   skill, 5.2 projections only) → weights must be built (W1 equal/agreement, W2 Yu Fig. 3, W3 WUP's own skill).
