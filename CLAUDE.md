@@ -53,6 +53,29 @@ COMPANION papers. Deadline: July 1, 2026 (no resubmission).
   - Server: Origin/CORS check and JSON errors.
   - `--self-test` (`selftest.py`, `Run_Self_Test.bat`).
   - Tests: `tests/test_robustness.py`.
+  Lines (2026-10-21; `lines.py`, `lines_ingest.py`, Lines tab, `--lines`, `--lines-download`; USAGE.md "Lines tab";
+  `docs/lines_data_sources.md`):
+  - Question: fire-weather danger along transmission lines, corridor vs region.
+    - Wes's definition of risk = seasonality + intensity (local/global maxima and minima) and their increase.
+    - Distribution lines: later, only if overlap is found (no public data). The advocacy write-up waits on those
+      results.
+  - Metrics per cell and year, built from daily maxima/minima files (`store.daily_year`, cached in
+    `<ws>/daily`, rebuilt when a year's chunks change):
+    - annual max;
+    - spring/fall peaks and summer trough (15-day smoothed);
+    - days above the regional P90/95/99 (Mar–Nov, pooled, exact histogram);
+    - first/last P90 day and span;
+    - peak hour;
+    - nights that do not recover (daily min above the P90 of minima).
+  - Trends: Theil–Sen + Mann–Kendall; Benjamini–Hochberg FDR for cell maps.
+  - Line data:
+    - Bundled layer = Wes's HIFLD clip (geometry only; the attributes were lost in the county join).
+    - HIFLD Open shut down 2025-08-26. The final release (data 2024-09-30) is downloadable from the Esri archive
+      (`hifld`) or the NETL mirror. OSM via Overpass (`osm`). `cross_attributes` fills owner/voltage gaps
+      (WUP 69 kV owners are mostly NOT AVAILABLE in HIFLD).
+  - Fire checks also compare whole series with the earlier real-AORC Pinery demo
+    (`static/geo/reference/pinery-2009-earlier-run.json`).
+  - Tests: `tests/test_lines.py`.
 - `docs/future_glarm_plan.md` — futures with GLARM (GATED on a full-record PASS). Key facts: public GLARM-Proj1 has
   only daily lake temp/ice/T2m → need RegCM SRF fields from Xue's group; Yu et al. 2023 give NO weights (sensitivity,
   skill, 5.2 projections only) → weights must be built (W1 equal/agreement, W2 Yu Fig. 3, W3 WUP's own skill).

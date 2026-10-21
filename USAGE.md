@@ -513,6 +513,62 @@ WUP_Explorer.exe --fire-checks --fires pinery-2009,summit-lake-2024
 These are case checks, not a skill score: one fire on one day says little on its own. A skill test needs
 every day with and without fires, which is the companion paper.
 
+### Lines tab: fire danger along power lines
+
+The question: where do the lines run through the places, seasons and years with the highest fire danger, and is it
+increasing? "Risk" here means the **seasonality and intensity** of fire danger. Every index is used: hourly FWI as
+its daily maximum, classic daily FWI, ERC, BI and FPI.
+
+For each year, each study cell gets:
+
+- **Intensity**:
+  - the annual maximum;
+  - the spring (Mar–Jun) and fall (Aug–Nov) peaks, the summer trough and the season minimum of the 15-day smoothed
+    series;
+  - days above the region's 90th / 95th / 99th percentile of daily maxima (all cells, March–November, so every
+    place is measured on one scale).
+- **Seasonality**:
+  - the dates of those peaks and troughs;
+  - the first and last day above the 90th percentile and the span between them;
+  - the mean seasonal cycle;
+  - the local hour of the daily peak on high-danger days.
+- **Change**: the Theil–Sen slope per decade and the Mann–Kendall p-value of each yearly metric. Cell maps mark
+  significance with the false discovery rate controlled (Benjamini–Hochberg, q = 0.10).
+
+Lines are mapped to the ~800 m cells they cross. The **corridor** (km-weighted) is compared with the **region** (all
+cells) year by year, and each line is ranked. Results go to `WUP_Explorer_data/lines/analyses/<layer>__<source>__<config>/`:
+
+- `lines.csv`
+- `yearly_corridor_vs_region.csv`
+- `seasonal_cycle.csv`
+- `cells.csv`
+- `lines_with_metrics.geojson`
+- `summary.json`
+- `README.txt`
+
+Line data:
+
+- The bundled layer is the WUP clip of HIFLD from Wes's ArcGIS project (geometry only).
+- *Download current lines…* fetches the final HIFLD release (2024-09-30, with voltage and owner) or OpenStreetMap.
+- *Fill gaps from* fills missing owners and voltages from a second layer that follows the same routes.
+- *Import lines…* takes GeoJSON or a zipped shapefile (and a GeoPackage / zipped .gdb when pyogrio is installed),
+  e.g. a utility's distribution lines.
+- See `docs/lines_data_sources.md` for what exists after the HIFLD Open shutdown and how good the owner fields are.
+
+```bat
+WUP_Explorer.exe --lines-download hifld     :: or osm, netl
+WUP_Explorer.exe --lines                    :: analyse every line layer (--full-record does this at the end)
+```
+
+Limits:
+
+- These are fire-*weather* danger measures. They are not ignition probability (line age, conductor, vegetation
+  contact, outage history) and not consequence (fuels, homes, egress).
+- A year counts for a cell when 90% of its March–November days are saved, and trends need ≥ 10 such years. So
+  compute the full record first.
+- AORC changes source streams by era (non-precipitation fields around 2015). Look for steps at those dates before
+  reading a trend as climate change.
+
 ### Data tab: inputs, offline use, climate datasets, verification, research bundle
 
 Click the source badge (top bar) or the **Data** tab.

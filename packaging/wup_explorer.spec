@@ -38,7 +38,7 @@ hiddenimports = (["cftime", "netCDF4.utils", "openpyxl", "tzdata", "zoneinfo"]
                  + collect_submodules("s3fs") + collect_submodules("fsspec.implementations")
                  + collect_submodules("xarray.backends")
                  + collect_submodules("rasterio") + collect_submodules("pystac_client") + collect_submodules("planetary_computer")
-                 + ["h5netcdf", "h5py", "requests"])
+                 + ["h5netcdf", "h5py", "requests", "shapefile"])
 binaries = collect_dynamic_libs("shapely") + collect_dynamic_libs("netCDF4") + collect_dynamic_libs("rasterio") + collect_dynamic_libs("h5py")
 
 a = Analysis([os.path.join(SPECPATH, "wup_explorer_entry.py")], pathex=[ROOT], binaries=binaries, datas=datas,

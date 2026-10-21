@@ -9,7 +9,7 @@
   W.renderTab = function () {
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === S.tab));
     const b = body(); b.innerHTML = '';
-    const f = { DAY: renderDaylight, FLOW: renderFlow, RES: renderResolution, COV: renderCoverage, JOBS: renderJobs, LIB: renderLibrary, FIRE: W.renderFires, DATA: W.renderData }[S.tab];
+    const f = { DAY: renderDaylight, FLOW: renderFlow, RES: renderResolution, COV: renderCoverage, JOBS: renderJobs, LIB: renderLibrary, FIRE: W.renderFires, LINES: W.renderLines, DATA: W.renderData }[S.tab];
     if (f) return f(b);
     renderFDI(b, S.tab);
   };

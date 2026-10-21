@@ -6,12 +6,12 @@
   const ST = { running: 'running', queued: 'paused', done: 'done', 'done-with-errors': 'paused', error: 'error', cancelled: 'paused' };
   const KIND = { 'aorc-download': 'AORC download', 'ndvi-ingest': 'NDVI ingest', verify: 'Verify', bundle: 'Bundle', 'bundle-check': 'Bundle check', 'dataset-localize': 'Dataset offline copy' };
   const BADGE = { PASS: 'fixed', WARN: 'open', FAIL: 'open', INFO: 'caveat' };
-  const PART_ORDER = ['app', 'results', 'inputs_aorc', 'ndvi', 'inputs_datasets', 'catalog'];
+  const PART_ORDER = ['app', 'results', 'inputs_aorc', 'ndvi', 'inputs_datasets', 'lines', 'daily', 'catalog'];
 
   async function load(full) {
     const jobs = [W.api('/api/data').then(r => { S.data.inv = r; })];
     if (full || !S.data.ds) jobs.push(W.api('/api/datasets').then(r => { S.data.ds = r; }).catch(() => {}));
-    if (full || !S.data.plan) jobs.push(W.api('/api/bundle/plan').then(r => { S.data.plan = r; if (!S.data.parts) S.data.parts = Object.keys(r.labels); }).catch(() => {}));
+    if (full || !S.data.plan) jobs.push(W.api('/api/bundle/plan').then(r => { S.data.plan = r; if (!S.data.parts) S.data.parts = r.default_parts || Object.keys(r.labels); }).catch(() => {}));
     await Promise.all(jobs);
   }
 

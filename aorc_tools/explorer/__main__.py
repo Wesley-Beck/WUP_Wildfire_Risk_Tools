@@ -112,16 +112,20 @@ def main(argv=None):
     g.add_argument("--full-record", action="store_true",
                    help="NDVI if missing -> compute the whole domain -> full verification (each step resumes)")
     g.add_argument("--bundle", default=None, metavar="ZIP", help="write a research bundle zip (app, inputs, NDVI, results, manifest)")
-    g.add_argument("--bundle-parts", default="app,results,inputs_aorc,inputs_datasets,ndvi,catalog",
+    g.add_argument("--bundle-parts", default="app,results,inputs_aorc,inputs_datasets,ndvi,catalog,lines",
                    help="comma-separated: app, results, inputs_aorc, inputs_datasets, ndvi, catalog")
     g.add_argument("--no-ndvi", action="store_true", help="with --full-record: do not check/ingest NDVI first")
     g.add_argument("--repair", action="store_true",
                    help="full verification, then set aside unreadable files so the next calculation recomputes them")
+    g.add_argument("--lines-download", metavar="SOURCE", default=None,
+                   help="download current power lines for the study area (osm, or an ArcGIS source listed in the Lines tab)")
+    g.add_argument("--lines", nargs="?", const="all", metavar="LAYER", default=None,
+                   help="analyse fire danger along line layers (default all; --full-record does this at the end)")
     g.add_argument("--self-test", action="store_true",
                    help="check this computer (packages, disk, folders, network) and run a short end-to-end test; writes a report")
     args = ap.parse_args(argv)
     headless = any([args.fire_checks, args.download_aorc, args.ingest_ndvi, args.compute, args.verify, args.full_record,
-                    args.bundle, args.repair])
+                    args.bundle, args.repair, args.lines_download, args.lines])
 
     base = base_dir()
     ws_dir = (Path(args.workspace) if args.workspace else default_workspace(base)).expanduser().resolve()
@@ -433,6 +437,29 @@ def run_headless(ws_dir, source, static_dir, output, args) -> int:
                 r = verify_step("4d", "full")
         if r is not None:
             rc = rc or (0 if r["overall"] != "FAIL" else 2)
+    if args.lines_download:
+        print(f"\n[L1] Download current power lines ({args.lines_download})")
+        t = run_task(c.post("/api/lines/download", json={"source": args.lines_download}))
+        if t and t.get("result"):
+            r = t["result"]
+            print(f"    layer {r['id']}: {r['n_features']} lines, {r['km']} km, voltage known for {r['with_voltage']}, "
+                  f"owner for {r['with_owner']}")
+    if args.lines or (args.full_record and rc == 0):
+        wanted = None if args.lines in (None, "all") else [x.strip() for x in args.lines.split(",")]
+        for lay in E["lines"].list():
+            if wanted and lay["id"] not in wanted:
+                continue
+            print(f"\n[L2] Fire danger along {lay.get('name', lay['id'])} ({lay.get('km')} km)")
+            t = run_task(c.post("/api/lines/analyse", json={"layer": lay["id"], "config": cfg.as_dict(), "source": src_name}))
+            if t and t.get("result"):
+                summ = E["line_analysis"].summary(t["result"]["id"])
+                ix = summ["indices"].get("FWI") or next(iter(summ["indices"].values()))
+                tr = (ix.get("trends") or {}).get("days_p90", {})
+                fmt = lambda d: "n/a" if not d or d.get("per_decade") is None else f"{d['per_decade']:+.2f}/decade (p {d['p']})"  # noqa: E731
+                if "corridor" in ix:
+                    print(f"    FWI days above the 90th percentile per year: corridor {ix['corridor']['days_p90']}, region "
+                          f"{ix['region']['days_p90']}; trend corridor {fmt(tr.get('corridor'))}, region {fmt(tr.get('region'))}")
+                print(f"    results: {t['result']['dir']}")
     if args.bundle:
         print(f"\n[5] Research bundle -> {args.bundle}")
         t = run_task(c.post("/api/bundle", json={"path": args.bundle, "parts": args.bundle_parts.split(",")}))

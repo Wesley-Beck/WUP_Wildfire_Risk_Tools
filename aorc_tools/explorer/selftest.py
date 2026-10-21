@@ -153,6 +153,27 @@ def check_network(R: Report, timeout=60):
     r = _timed(cdr, timeout)
     R.add("network", "NOAA CDR NDVI bucket", "PASS" if "error" not in r else "WARN",
           f"listed in {r['seconds']:.1f} s" if "error" not in r else r["error"][:200])
+
+    def hifld():
+        import requests
+        from aorc_tools.explorer.lines_ingest import SOURCES
+        resp = requests.get(SOURCES["hifld"]["url"] + "/query", timeout=timeout,
+                            params={"where": "1=1", "geometry": "-90.5,45.9,-87.3,47.6", "geometryType": "esriGeometryEnvelope",
+                                    "inSR": 4326, "spatialRel": "esriSpatialRelIntersects", "returnCountOnly": "true", "f": "json"})
+        resp.raise_for_status()
+        return resp.json()["count"]
+    r = _timed(hifld, timeout)
+    R.add("network", "HIFLD transmission lines (Esri archive)", "PASS" if "error" not in r else "WARN",
+          f"{r.get('value')} lines in the WUP box, answered in {r['seconds']:.1f} s" if "error" not in r else r["error"][:200])
+
+    def overpass():
+        import requests
+        resp = requests.get("https://overpass-api.de/api/status", timeout=timeout)
+        resp.raise_for_status()
+        return resp.text[:80]
+    r = _timed(overpass, timeout)
+    R.add("network", "OpenStreetMap Overpass API", "PASS" if "error" not in r else "WARN",
+          f"answered in {r['seconds']:.1f} s" if "error" not in r else r["error"][:200])
     return res
 
 

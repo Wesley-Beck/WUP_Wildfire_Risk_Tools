@@ -1,0 +1,12 @@
+{
+ "name": "WUP transmission lines (HIFLD, Nov 2024 export; geometry only)",
+ "kind": "transmission",
+ "source": "HIFLD Electric Power Transmission Lines, clipped to the six WUP counties in Wesley Beck's ArcGIS Pro project TransmissionLines.aprx (2024-11-04). The county spatial join dropped the HIFLD attributes (voltage, owner, substations), so this copy has geometry and county only.",
+ "license": "HIFLD Open (public domain, U.S. Government); see the source layer for terms.",
+ "attribution": "Homeland Infrastructure Foundation-Level Data (HIFLD), Electric Power Transmission Lines",
+ "notes": "Lines are split at county boundaries (75 pieces). For voltage and owner, download a current layer from the Lines tab (OpenStreetMap / HIFLD / EIA) or import the original HIFLD export.",
+ "n_features": 75,
+ "km": 803.8,
+ "with_voltage": 0,
+ "with_owner": 0
+}

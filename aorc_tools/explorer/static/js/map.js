@@ -169,7 +169,11 @@
   }
 
   /* ---- colouring ---- */
-  W.paintValues = function (pids, values, lo, hi, isTier) {
+  const cellColor = diverging => { const v = ['coalesce', ['feature-state', 'v'], -1], R = diverging ? W.DIVERGE : W.RAMP;
+    const stops = R.flatMap((c, i) => [i / (R.length - 1), c]);
+    return ['case', ['<', v, 0], 'rgba(255,255,255,0.025)', ['interpolate', ['linear'], v, ...stops]]; };
+  W.paintValues = function (pids, values, lo, hi, isTier, diverging = false) {
+    if (S.cellDiverging !== diverging) { map.setPaintProperty('cells-fill', 'fill-color', cellColor(diverging)); S.cellDiverging = diverging; }
     map.removeFeatureState({ source: 'cells' });
     for (const p of S.sel) map.setFeatureState({ source: 'cells', id: p }, { sel: true });
     if (S.focusPid != null) map.setFeatureState({ source: 'cells', id: S.focusPid }, { focus: true });
@@ -178,13 +182,13 @@
     for (let k = 0; k < pids.length; k++) { const x = values[k]; if (x == null) continue;
       map.setFeatureState({ source: 'cells', id: pids[k] }, isTier ? { t: x } : { v: Math.max(0, Math.min(1, (x - lo) / (hi - lo))) }); }
   };
-  W.legend = function (title, lo, hi, extra, isTier) {
+  W.legend = function (title, lo, hi, extra, isTier, diverging = false) {
     $('legend-title').textContent = title;
     if (isTier) {
       $('legend-bar').style.background = `linear-gradient(to right, ${[0, 1, 2, 3, 4, 9].map((t, i) => `${W.TIER_COLOR[t]} ${i * 16.6}%, ${W.TIER_COLOR[t]} ${(i + 1) * 16.6}%`).join(',')})`;
       $('legend-min').textContent = '0 native'; $('legend-mid').textContent = '2–4 neighbours'; $('legend-max').textContent = '9 none';
     } else {
-      $('legend-bar').style.background = `linear-gradient(to right, ${W.RAMP.join(',')})`;
+      $('legend-bar').style.background = `linear-gradient(to right, ${(diverging ? W.DIVERGE : W.RAMP).join(',')})`;
       $('legend-min').textContent = W.fmt(lo, 0); $('legend-mid').textContent = W.fmt((lo + hi) / 2, 0); $('legend-max').textContent = W.fmt(hi, 0);
     }
     $('legend-extra').textContent = extra || '';

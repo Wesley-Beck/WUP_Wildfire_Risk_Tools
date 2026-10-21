@@ -48,7 +48,10 @@ PARTS = {
     "ndvi": "NDVI composites, relative-greenness envelope and fuel models (FPI inputs)",
     "inputs_datasets": "Offline copies of climate-model datasets (WUP window), e.g. GLARM",
     "catalog": "Workspace catalog, settings, jobs, fire catalog and checks, dataset definitions, reports",
+    "lines": "Power-line layers (downloaded / imported) and their fire-danger analyses",
+    "daily": "Daily maxima per year (built from the hourly results; quick to rebuild, so off by default)",
 }
+DEFAULT_OFF = {"daily"}
 CITATIONS = [
     "Fall, G. et al. (2023) The Office of Water Prediction's Analysis of Record for Calibration, version 1.1. JAWRA. doi:10.1111/1752-1688.13143",
     "Van Wagner, C.E. (1987) Development and structure of the Canadian Forest Fire Weather Index System. Forestry Tech. Rep. 35.",
@@ -56,6 +59,12 @@ CITATIONS = [
     "Burgan, R.E., Klaver, R.W., Klaver, J.M. (1998) Fuel models and fire potential from satellite and surface observations. IJWF 8(3).",
     "Bradshaw, L.S. et al. (1984) The 1978 National Fire-Danger Rating System: technical documentation. GTR INT-169.",
     "Didan, K. (2021) MODIS/Terra Vegetation Indices 16-Day L3 Global 250m SIN Grid V061 (MOD13Q1). NASA LP DAAC.",
+    "Oak Ridge National Laboratory; U.S. Department of Homeland Security (2025) HIFLD OPEN Transmission Lines. ICPSR. "
+    "doi:10.3886/E240591V1 (lines analysis, when HIFLD lines are used)",
+    "Sen, P.K. (1968) Estimates of the regression coefficient based on Kendall's tau. JASA 63, 1379-1389; Mann, H.B. (1945) "
+    "Nonparametric tests against trend. Econometrica 13, 245-259 (line-analysis trends)",
+    "Wilks, D.S. (2016) 'The stippling shows statistically significant grid points': how research results are routinely "
+    "overstated and overinterpreted, and what to do about it. BAMS 97, 2263-2273 (false discovery rate in trend maps)",
     "Yu, G. et al. (2023) Performance of fire danger indices and their utility in predicting future wildfire danger over the "
     "conterminous United States. Earth's Future 11, e2023EF003823.",
 ]
@@ -113,7 +122,7 @@ def git_commit(root: Path | None) -> str | None:
 def plan(ws, ctx, parts=None, results_filter=None) -> dict:
     """What would go into a bundle: (arcname, path) per part, with sizes. ``results_filter``: list of
     ``source/config_id`` to include (default: everything saved)."""
-    parts = set(parts or PARTS)
+    parts = set(parts or (set(PARTS) - DEFAULT_OFF))
     files: dict[str, list[tuple[str, Path]]] = {k: [] for k in PARTS}
     W = "WUP_Explorer_data"
     if "app" in parts:
@@ -145,6 +154,10 @@ def plan(ws, ctx, parts=None, results_filter=None) -> dict:
         sd = Path(ctx.static_dir)
         for p in _walk(sd):
             files["ndvi"].append((f"{W}/inputs/static/{p.relative_to(sd).as_posix()}", p))
+    for part, d in (("lines", "lines"), ("daily", "daily")):
+        if part in parts:
+            for p in _walk(ws.root / d):
+                files[part].append((f"{W}/{p.relative_to(ws.root).as_posix()}", p))
     if "catalog" in parts:
         for name in ("settings.json",):
             if (ws.root / name).exists():

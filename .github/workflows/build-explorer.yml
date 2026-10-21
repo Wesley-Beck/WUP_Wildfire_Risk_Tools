@@ -31,7 +31,7 @@ jobs:
       - name: Unit tests (explorer)
         run: |
           pip install pytest
-          python -m pytest tests/test_explorer.py tests/test_data_pipeline.py tests/test_robustness.py -q
+          python -m pytest tests/test_explorer.py tests/test_data_pipeline.py tests/test_robustness.py tests/test_lines.py -q
       - name: Record the package versions the tests passed with
         run: pip freeze --exclude-editable > requirements-tested.txt
       - name: Build

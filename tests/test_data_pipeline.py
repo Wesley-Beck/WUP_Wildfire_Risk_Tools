@@ -227,7 +227,8 @@ def test_bundle_roundtrip_and_offline_rerun(aorc_ws, tmp_path):
 def test_bundle_plan_and_endpoint(syn_ws, tmp_path):
     c = syn_ws.test_client()
     pl = c.get("/api/bundle/plan").get_json()
-    assert set(pl["labels"]) == {"app", "results", "inputs_aorc", "inputs_datasets", "ndvi", "catalog"}
+    assert set(pl["labels"]) == {"app", "results", "inputs_aorc", "inputs_datasets", "ndvi", "catalog", "lines", "daily"}
+    assert "daily" not in pl["default_parts"] and "lines" in pl["default_parts"]
     assert pl["parts"]["results"]["bytes"] > 0 and pl["parts"]["app"]["files"] > 20
     inside = c.post("/api/bundle", json={"path": str(syn_ws.extensions["wup"]["ws"].root / "x.zip")})
     assert inside.status_code == 400                                                  # never inside the workspace itself

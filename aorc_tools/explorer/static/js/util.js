@@ -18,6 +18,8 @@ W.META = {
 };
 // single-hue sequential ramp for magnitude on the map
 W.RAMP = ['#fde3c8', '#f6b983', '#ee8a4a', '#d9582a', '#a8331b', '#6b1d0f'];
+/* diverging (trends): decrease blue - no change grey - increase orange/red */
+W.DIVERGE = ['#2d68b3', '#7ea6d8', '#6c6f74', '#eea06a', '#c8452b'];
 // tier = data-quality state: status colours (always shown with a label)
 W.TIER_COLOR = { 0: '#2fa36b', 1: '#9fb84a', 2: '#c98500', 3: '#d95926', 4: '#b8452d', 9: '#e66767' };
 

@@ -41,7 +41,15 @@ python -m aorc_tools.explorer                 # real AORC if reachable, local st
 python -m aorc_tools.explorer --fire-checks   # headless: compute fire seasons, check known fires, write reports
 python -m aorc_tools.explorer --full-record   # headless: NDVI if missing -> whole record (resumable) -> full verification
 python -m aorc_tools.explorer --bundle D:/WUP_FDI_bundle.zip   # one zip: program + inputs + NDVI + results + manifest
+python -m aorc_tools.explorer --lines-download hifld   # current transmission lines (final HIFLD release; or osm)
+python -m aorc_tools.explorer --lines         # fire danger along every line layer: seasonality, intensity, trends
+python -m aorc_tools.explorer --self-test     # check this computer before a long run (Run_Self_Test.bat)
 ```
+
+The **Lines** tab compares fire danger along power lines with the region. It covers seasonal peaks and troughs,
+annual maxima, days above regional percentiles, nights that do not recover, and Theil–Sen / Mann–Kendall trends,
+and ranks the lines. It is fire-weather danger, not ignition probability. See `docs/lines_data_sources.md` for
+line data after the HIFLD Open shutdown.
 
 The explorer's **Data** tab covers the AORC input store (offline use), NDVI ingest (Planetary Computer,
 AppEEARS, NOAA CDR, local rasters), climate-model datasets (GLARM/RegCM, CMIP/CORDEX, WRF, ERA5), record

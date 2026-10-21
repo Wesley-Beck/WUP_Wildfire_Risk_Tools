@@ -64,6 +64,8 @@ FILL_I2 = np.int16(-32768)
 FILL_U1 = np.uint8(255)
 from aorc_tools.explorer.hdf import HDF_LOCK as NC_LOCK  # noqa: E402  (one lock for all HDF5 use)
 from aorc_tools.explorer.runtime import fsync_file, replace_file  # noqa: E402
+
+DAILY_FORMAT = 2        # 2: daily minima added; older daily files are rebuilt
 TIME_UNITS = "hours since 1979-01-01 00:00:00"
 T_EPOCH = pd.Timestamp("1979-01-01")
 COUNTIES = ["Baraga", "Gogebic", "Houghton", "Iron", "Keweenaw", "Ontonagon"]
@@ -623,6 +625,165 @@ class ResultsStore:
         replace_file(tmp, out_path)
         return out
 
+    # ------------------------------------------------------------------ daily maxima (local standard days)
+    def year_signature(self, source, cfg_id, year) -> str:
+        """Changes whenever a chunk of that year is added, recomputed or marked continuous."""
+        with self.ws.conn() as c:
+            r = c.execute("SELECT COUNT(*), MAX(rowid), SUM(continuity='continuous'), MAX(t_end) FROM chunks "
+                          "WHERE source=? AND config_id=? AND year=?", (source, cfg_id, int(year))).fetchone()
+        return "|".join(str(x) for x in tuple(r))
+
+    def daily_path(self, source, cfg_id, year) -> Path:
+        return self.ws.root / "daily" / source / cfg_id / f"WUP_FDI_daily_{year}_{source}_{cfg_id}.nc"
+
+    def daily_year(self, source, cfg_id, year, force=False) -> Path | None:
+        """WUP_FDI_daily_<year>_….nc in <workspace>/daily (daily maxima only, no hourly merge). Rebuilt only when that
+        year's saved chunks changed. None when nothing is saved for the year."""
+        import netCDF4
+        from aorc_tools.explorer.chain import ChainConfig
+        files = self.files(source, cfg_id, year)
+        if not files:
+            return None
+        path = self.daily_path(source, cfg_id, year)
+        sig = self.year_signature(source, cfg_id, year)
+        if path.exists() and not force:
+            try:
+                with NC_LOCK, netCDF4.Dataset(path) as ds:
+                    if getattr(ds, "catalog_sig", None) == sig and int(getattr(ds, "daily_format", 1)) == DAILY_FORMAT:
+                        return path
+            except Exception as e:                                   # damaged: rebuild it
+                logger.warning("daily file %s unreadable (%s); rebuilding", path, e)
+        with NC_LOCK:
+            with netCDF4.Dataset(files[0]["path"]) as src0:
+                cfg = ChainConfig.from_dict(json.loads(src0.config_json))
+        nd, dmax, dhr = self._daily_arrays(files, year)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_daily(path, year, nd, dmax, dhr, source, cfg, catalog_sig=sig)
+        return path
+
+    def _daily_arrays(self, files, year):
+        """Each index's maximum over each cell's local standard day (FWI_daily: its 12:00 LST value), and the local
+        hour of the maximum; computed in cell space, one chunk file at a time."""
+        off = self.grid.points.std_offset_h.values.astype(int)
+        d0 = pd.Timestamp(year, 1, 1)
+        nd = 366 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 365
+        n_c = self.grid.n_cells
+        dmax = {v: np.full((nd, n_c), np.nan, dtype=np.float32) for v in SAVED}
+        dhr = {v: np.full((nd, n_c), -1, dtype=np.int8) for v in SAVED}
+        dmin = {v: np.full((nd, n_c), np.nan, dtype=np.float32) for v in SAVED if v != "FWI_daily"}
+        for f in files:
+            raw = self._read(f["path"], SAVED)
+            hrs = ((raw["_times"] - d0) / pd.Timedelta("1h")).astype(np.int64).values
+            for v in SAVED:
+                if v not in raw:
+                    continue
+                a = self.unpack(v, raw[v][:, self.y, self.x])                    # (n_t, n_cells)
+                if v == "FWI_daily":                                          # a daily value: take it at 12:00 LST
+                    for o in np.unique(off):
+                        cm = np.where(off == o)[0]
+                        lh = hrs + o
+                        sel = np.where(lh % 24 == 12)[0]
+                        di = lh[sel] // 24
+                        okd = (di >= 0) & (di < nd)
+                        dmax[v][np.ix_(di[okd], cm)] = a[np.ix_(sel[okd], cm)]
+                        dhr[v][np.ix_(di[okd], cm)] = 12
+                    continue
+                for o in np.unique(off):
+                    cm = np.where(off == o)[0]
+                    lh = hrs + o
+                    day, hod = lh // 24, lh % 24
+                    for di in np.unique(day):
+                        if di < 0 or di >= nd:
+                            continue
+                        tm = np.where(day == di)[0]
+                        blk = a[np.ix_(tm, cm)]
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore", RuntimeWarning)
+                            mx = np.nanmax(blk, axis=0)
+                            dmin[v][di, cm] = np.fmin(dmin[v][di, cm], np.nanmin(blk, axis=0))
+                        cur = dmax[v][di, cm]
+                        better = np.isfinite(mx) & (~np.isfinite(cur) | (mx > cur))
+                        if better.any():
+                            amx = np.argmax(np.where(np.isfinite(blk), blk, -np.inf), axis=0)
+                            dmax[v][di, cm[better]] = mx[better]
+                            dhr[v][di, cm[better]] = hod[tm][amx[better]].astype(np.int8)
+        dmax["_min"] = dmin                                     # carried along with the maxima
+        return nd, dmax, dhr
+
+    def _write_daily(self, daily, year, nd, dmax, dhr, source, cfg, catalog_sig=None):
+        import netCDF4
+        tmp = daily.with_name(daily.stem + ".tmp")
+        with NC_LOCK:
+            out = netCDF4.Dataset(tmp, "w", format="NETCDF4")
+        try:
+            with NC_LOCK:
+                out.createDimension("time", nd)
+                out.createDimension("latitude", self.ny)
+                out.createDimension("longitude", self.nx)
+                t = out.createVariable("time", "i4", ("time",))
+                t.units, t.calendar, t.axis = f"days since {year}-01-01", "standard", "T"
+                t.long_name = "local standard date (each cell's own time zone)"
+                t[:] = np.arange(nd)
+                la = out.createVariable("latitude", "f8", ("latitude",)); la.units, la.standard_name = "degrees_north", "latitude"; la[:] = self.lat
+                lo = out.createVariable("longitude", "f8", ("longitude",)); lo.units, lo.standard_name = "degrees_east", "longitude"; lo[:] = self.lon
+            dmin = dmax.get("_min", {})
+            for v in SAVED:                                          # one variable per lock hold (see export_year)
+                s, ln, units, _ = PACK[v]
+                if v in dmin:
+                    g = np.full((nd, self.ny, self.nx), FILL_I2, dtype=np.int16)
+                    g[:, self.y, self.x] = np.where(np.isfinite(dmin[v]), np.round(dmin[v] / s), FILL_I2).astype(np.int16)
+                    with NC_LOCK:
+                        var = out.createVariable(f"{v}_daily_min", "i2", ("time", "latitude", "longitude"), fill_value=FILL_I2,
+                                                 chunksizes=(31, 64, 64), **COMP)
+                        var.scale_factor, var.add_offset = np.float32(s), np.float32(0)
+                        var.long_name, var.units = f"daily minimum of {ln} over the local standard day (overnight recovery)", units
+                        var.set_auto_maskandscale(False)
+                        var[:] = g
+                    del g
+                vname = "FWI_daily_noon" if v == "FWI_daily" else f"{v}_daily_max"
+                g = np.full((nd, self.ny, self.nx), FILL_I2, dtype=np.int16)
+                g[:, self.y, self.x] = np.where(np.isfinite(dmax[v]), np.round(dmax[v] / s), FILL_I2).astype(np.int16)
+                with NC_LOCK:
+                    var = out.createVariable(vname, "i2", ("time", "latitude", "longitude"), fill_value=FILL_I2,
+                                             chunksizes=(31, 64, 64), **COMP)
+                    var.scale_factor, var.add_offset = np.float32(s), np.float32(0)
+                    var.long_name, var.units = (f"{ln} (value at the 12:00 LST observation)" if v == "FWI_daily"
+                                                else f"daily maximum of {ln} over the local standard day"), units
+                    var.set_auto_maskandscale(False)
+                    var[:] = g
+                del g
+                if v == "FWI_daily":
+                    continue
+                gh = np.full((nd, self.ny, self.nx), -1, dtype=np.int8)
+                gh[:, self.y, self.x] = dhr[v]
+                with NC_LOCK:
+                    hv = out.createVariable(f"{v}_hour_of_max", "i1", ("time", "latitude", "longitude"), fill_value=np.int8(-1),
+                                            chunksizes=(31, 64, 64), **COMP)
+                    hv.long_name = f"local standard hour (0-23) when {v} peaked"
+                    hv.set_auto_maskandscale(False)
+                    hv[:] = gh
+                del gh
+            with NC_LOCK:
+                self._static_vars(out)
+                self._global_attrs(out, source, cfg)
+                out.title = "Daily maximum fire danger indices (local standard day), Western Upper Peninsula of Michigan"
+                out.history = f"{datetime.now().isoformat(timespec='seconds')} daily maxima from hourly chunk files"
+                out.daily_format = DAILY_FORMAT
+                if catalog_sig is not None:
+                    out.catalog_sig = catalog_sig
+        except BaseException:
+            with NC_LOCK:
+                try:
+                    out.close()
+                except Exception:                                    # noqa: BLE001
+                    pass
+            tmp.unlink(missing_ok=True)
+            raise
+        with NC_LOCK:
+            out.close()
+        fsync_file(tmp)
+        _replace(tmp, daily)
+
     # ------------------------------------------------------------------ one-file-per-year exports
     def export_year(self, source, cfg_id, year, out_dir: Path):
         """Merge a year's chunk files into WUP_FDI_hourly_<year>_….nc and build WUP_FDI_daily_<year>_….nc
@@ -688,103 +849,7 @@ class ResultsStore:
         fsync_file(tmp)
         _replace(tmp, hourly)
 
-        # daily maxima over each cell's local standard day, computed in cell space (memory-light)
-        off = self.grid.points.std_offset_h.values.astype(int)
-        d0 = pd.Timestamp(year, 1, 1)
-        nd = 366 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 365
-        n_c = self.grid.n_cells
-        dmax = {v: np.full((nd, n_c), np.nan, dtype=np.float32) for v in SAVED}
-        dhr = {v: np.full((nd, n_c), -1, dtype=np.int8) for v in SAVED}
-        for f in files:
-            raw = self._read(f["path"], SAVED)
-            hrs = ((raw["_times"] - d0) / pd.Timedelta("1h")).astype(np.int64).values
-            for v in SAVED:
-                if v not in raw:
-                    continue
-                a = self.unpack(v, raw[v][:, self.y, self.x])                    # (n_t, n_cells)
-                if v == "FWI_daily":                                          # a daily value: take it at 12:00 LST
-                    for o in np.unique(off):
-                        cm = np.where(off == o)[0]
-                        lh = hrs + o
-                        sel = np.where(lh % 24 == 12)[0]
-                        di = lh[sel] // 24
-                        okd = (di >= 0) & (di < nd)
-                        dmax[v][np.ix_(di[okd], cm)] = a[np.ix_(sel[okd], cm)]
-                        dhr[v][np.ix_(di[okd], cm)] = 12
-                    continue
-                for o in np.unique(off):
-                    cm = np.where(off == o)[0]
-                    lh = hrs + o
-                    day, hod = lh // 24, lh % 24
-                    for di in np.unique(day):
-                        if di < 0 or di >= nd:
-                            continue
-                        tm = np.where(day == di)[0]
-                        blk = a[np.ix_(tm, cm)]
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore", RuntimeWarning)
-                            mx = np.nanmax(blk, axis=0)
-                        cur = dmax[v][di, cm]
-                        better = np.isfinite(mx) & (~np.isfinite(cur) | (mx > cur))
-                        if better.any():
-                            amx = np.argmax(np.where(np.isfinite(blk), blk, -np.inf), axis=0)
-                            dmax[v][di, cm[better]] = mx[better]
-                            dhr[v][di, cm[better]] = hod[tm][amx[better]].astype(np.int8)
-        tmp = daily.with_name(daily.stem + ".tmp")
-        with NC_LOCK:
-            out = netCDF4.Dataset(tmp, "w", format="NETCDF4")
-        try:
-            with NC_LOCK:
-                out.createDimension("time", nd)
-                out.createDimension("latitude", self.ny)
-                out.createDimension("longitude", self.nx)
-                t = out.createVariable("time", "i4", ("time",))
-                t.units, t.calendar, t.axis = f"days since {year}-01-01", "standard", "T"
-                t.long_name = "local standard date (each cell's own time zone)"
-                t[:] = np.arange(nd)
-                la = out.createVariable("latitude", "f8", ("latitude",)); la.units, la.standard_name = "degrees_north", "latitude"; la[:] = self.lat
-                lo = out.createVariable("longitude", "f8", ("longitude",)); lo.units, lo.standard_name = "degrees_east", "longitude"; lo[:] = self.lon
-            for v in SAVED:                                          # one variable per lock hold (see export_year)
-                s, ln, units, _ = PACK[v]
-                vname = "FWI_daily_noon" if v == "FWI_daily" else f"{v}_daily_max"
-                g = np.full((nd, self.ny, self.nx), FILL_I2, dtype=np.int16)
-                g[:, self.y, self.x] = np.where(np.isfinite(dmax[v]), np.round(dmax[v] / s), FILL_I2).astype(np.int16)
-                with NC_LOCK:
-                    var = out.createVariable(vname, "i2", ("time", "latitude", "longitude"), fill_value=FILL_I2,
-                                             chunksizes=(31, 64, 64), **COMP)
-                    var.scale_factor, var.add_offset = np.float32(s), np.float32(0)
-                    var.long_name, var.units = (f"{ln} (value at the 12:00 LST observation)" if v == "FWI_daily"
-                                                else f"daily maximum of {ln} over the local standard day"), units
-                    var.set_auto_maskandscale(False)
-                    var[:] = g
-                del g
-                if v == "FWI_daily":
-                    continue
-                gh = np.full((nd, self.ny, self.nx), -1, dtype=np.int8)
-                gh[:, self.y, self.x] = dhr[v]
-                with NC_LOCK:
-                    hv = out.createVariable(f"{v}_hour_of_max", "i1", ("time", "latitude", "longitude"), fill_value=np.int8(-1),
-                                            chunksizes=(31, 64, 64), **COMP)
-                    hv.long_name = f"local standard hour (0-23) when {v} peaked"
-                    hv.set_auto_maskandscale(False)
-                    hv[:] = gh
-                del gh
-            with NC_LOCK:
-                self._static_vars(out)
-                self._global_attrs(out, source, cfg)
-                out.title = "Daily maximum fire danger indices (local standard day), Western Upper Peninsula of Michigan"
-                out.history = f"{datetime.now().isoformat(timespec='seconds')} daily maxima from hourly chunk files"
-        except BaseException:
-            with NC_LOCK:
-                try:
-                    out.close()
-                except Exception:                                    # noqa: BLE001
-                    pass
-            tmp.unlink(missing_ok=True)
-            raise
-        with NC_LOCK:
-            out.close()
-        fsync_file(tmp)
-        _replace(tmp, daily)
+        nd, dmax, dhr = self._daily_arrays(files, year)
+        self._write_daily(daily, year, nd, dmax, dhr, source, cfg)
         return {"hourly": str(hourly), "daily": str(daily), "hourly_bytes": hourly.stat().st_size,
                 "daily_bytes": daily.stat().st_size, "chunk_files": len(files)}

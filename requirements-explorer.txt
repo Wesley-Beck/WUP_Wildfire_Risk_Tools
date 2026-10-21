@@ -18,3 +18,5 @@ planetary-computer>=1.0
 h5netcdf>=1.2
 h5py>=3.8
 requests>=2.28
+# power-line layers (Lines tab): zipped shapefile import. GeoPackage / .gdb import also works when pyogrio is installed (optional)
+pyshp>=2.3

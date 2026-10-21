@@ -180,8 +180,11 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
     extracted = extracted or ExtractedStore("data/output")
     fire_catalog = firemod.FireCatalog(ws, grid)
     tasks = TaskRunner(ws, grid, ctx)
+    from aorc_tools.explorer import lines as linesmod
+    line_layers = linesmod.LineLayers(ws, grid)
+    line_analysis = linesmod.LineAnalysis(ws, grid, store, line_layers)
     app.extensions["wup"] = {"ws": ws, "grid": grid, "ctx": ctx, "store": store, "jobs": jobs, "fires": fire_catalog,
-                             "tasks": tasks}
+                             "tasks": tasks, "lines": line_layers, "line_analysis": line_analysis}
     live_lock = threading.Semaphore(1)                  # one live calculation at a time (memory)
     if start_jobs:
         jobs.start()
@@ -994,9 +997,10 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
     @app.get("/api/bundle/plan")
     def bundle_plan():
         from aorc_tools.explorer import bundle as bundlemod
-        parts = [p for p in request.args.get("parts", "").split(",") if p] or None
+        parts = [p for p in request.args.get("parts", "").split(",") if p] or list(bundlemod.PARTS)
         pl = bundlemod.plan(ws, ctx, parts)
         return jsonify({"parts": pl["parts"], "total_bytes": pl["total_bytes"], "labels": bundlemod.PARTS,
+                        "default_parts": [k for k in bundlemod.PARTS if k not in bundlemod.DEFAULT_OFF],
                         "default_path": str(ws.root.parent / f"WUP_FDI_bundle_{datetime.now():%Y%m%d}.zip"),
                         "configs": store.configs()})
 
@@ -1004,7 +1008,8 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
     def bundle_make():
         from aorc_tools.explorer import bundle as bundlemod
         b = body()
-        parts = [p for p in (b.get("parts") or list(bundlemod.PARTS)) if p in bundlemod.PARTS]
+        parts = [p for p in (b.get("parts") or [k for k in bundlemod.PARTS if k not in bundlemod.DEFAULT_OFF])
+                 if p in bundlemod.PARTS]
         path = Path(b.get("path") or ws.root.parent / f"WUP_FDI_bundle_{datetime.now():%Y%m%d}.zip").expanduser()
         if path.suffix.lower() != ".zip":
             path = path.with_suffix(".zip")
@@ -1188,6 +1193,143 @@ def create_app(ws: Workspace, grid: Grid, ctx: Context, *, extracted: ExtractedS
                                     "mixed": sum(r.get("verdict", {}).get("kind") == "mixed" for r in ok),
                                     "not_elevated": sum(r.get("verdict", {}).get("kind") == "not-elevated" for r in ok),
                                     "unranked": sum(r.get("verdict", {}).get("kind") == "unranked" for r in ok)}})
+
+    # ------------------------------------------------------------------ power lines and fire danger
+    @app.get("/api/lines/layers")
+    def lines_layers():
+        return jsonify({"layers": line_layers.list()})
+
+    @app.get("/api/lines/layers/<lid>")
+    def lines_layer(lid):
+        try:
+            return jsonify(line_layers.get(lid))
+        except KeyError as e:
+            return err(str(e), 404)
+
+    @app.post("/api/lines/layers/import")
+    def lines_import():
+        f = request.files.get("file")
+        if f is None:
+            return err("no file")
+        return jsonify(line_layers.import_file(f.filename or "lines.geojson", f.read(), name=request.form.get("name")))
+
+    @app.post("/api/lines/layers/<lid>/crosscheck")
+    def lines_crosscheck(lid):
+        b = body()
+        other = line_layers.check_id(b.get("other", ""))
+        max_m = float(b.get("max_m", 150))
+        if not 10 <= max_m <= 2000:
+            raise ValueError("max_m must be 10..2000 m")
+        return jsonify(linesmod.cross_attributes(line_layers, line_layers.check_id(lid), other, max_m=max_m))
+
+    @app.delete("/api/lines/layers/<lid>")
+    def lines_delete(lid):
+        line_layers.delete(lid)
+        return jsonify({"deleted": lid})
+
+    @app.get("/api/lines/sources")
+    def lines_sources():
+        from aorc_tools.explorer import lines_ingest
+        return jsonify({"sources": lines_ingest.sources_payload()})
+
+    def _lines_download_task(tid, params, progress):
+        from aorc_tools.explorer import lines_ingest
+        return lines_ingest.download(line_layers, params["source"], progress=progress)
+
+    tasks.register("lines-download", _lines_download_task)
+
+    @app.post("/api/lines/download")
+    def lines_download():
+        from aorc_tools.explorer import lines_ingest
+        b = body()
+        sid = b.get("source", "osm")
+        if sid not in lines_ingest.SOURCES:
+            raise ValueError(f"unknown line source {sid}")
+        if ws.settings.get("offline"):
+            return err("offline mode: downloads are off (switch the source to online first)", 409)
+        tid = tasks.create("lines-download", f"Download lines: {lines_ingest.SOURCES[sid]['label']}", {"source": sid})
+        if b.get("wait"):
+            tasks.run_now(tid)
+        return jsonify(tasks.get(tid))
+
+    def _lines_task(tid, params, progress):
+        return line_analysis.run(params["layer"], params["source"], params["config_id"], indices=params.get("indices"),
+                                 years=params.get("years"), ref_years=params.get("ref_years"), progress=progress)
+
+    tasks.register("lines", _lines_task)
+
+    def _years_arg(v):
+        if not v:
+            return None
+        return list(range(int(v[0]), int(v[-1]) + 1)) if len(v) == 2 else [int(y) for y in v]
+
+    @app.post("/api/lines/analyse")
+    def lines_analyse():
+        b = body()
+        cfg = cfg_from(b)
+        source = b.get("source") or ctx.active
+        lid = line_layers.check_id(b.get("layer", "wup_transmission_hifld_2024"))
+        lmeta = line_layers.meta(lid)
+        idx = b.get("indices")
+        if idx is not None and (not isinstance(idx, list) or not set(idx) <= set(linesmod.INDICES)):
+            raise ValueError(f"indices must be a list from {linesmod.INDICES}")
+        tid = tasks.create("lines", f"Lines: {lmeta.get('name', lid)} ({source} {cfg.id})",
+                           {"layer": lid, "source": source, "config_id": cfg.id, "indices": idx,
+                            "years": _years_arg(b.get("years")), "ref_years": _years_arg(b.get("ref_years"))})
+        if b.get("wait"):
+            tasks.run_now(tid)
+        return jsonify(tasks.get(tid))
+
+    @app.get("/api/lines/analyses")
+    def lines_analyses():
+        return jsonify({"analyses": line_analysis.list()})
+
+    @app.get("/api/lines/analyses/<aid>")
+    def lines_summary(aid):
+        try:
+            return jsonify(line_analysis.summary(aid))
+        except KeyError as e:
+            return err(str(e), 404)
+
+    @app.get("/api/lines/analyses/<aid>/cells")
+    def lines_cells(aid):
+        try:
+            pids, vals, km = line_analysis.cell_field(aid, request.args.get("key", "FWI.days_p95_mean"))
+        except KeyError as e:
+            return err(str(e), 404)
+        fin = np.isfinite(vals)
+        lo, hi = (float(np.nanpercentile(vals, 2)), float(np.nanpercentile(vals, 98))) if fin.any() else (0.0, 1.0)
+        if request.args.get("corridor") == "1":
+            keep = km > 0
+            pids, vals = pids[keep], vals[keep]
+        return jsonify({"point_ids": pids.tolist(), "values": [None if not np.isfinite(x) else round(float(x), 4) for x in vals],
+                        "lo": lo, "hi": hi if hi > lo else lo + 1})
+
+    @app.get("/api/lines/analyses/<aid>/yearly")
+    def lines_yearly(aid):
+        try:
+            df = line_analysis.yearly(aid)
+        except KeyError as e:
+            return err(str(e), 404)
+        df = df[(df["index"] == request.args.get("index", "FWI")) & (df["metric"] == request.args.get("metric", "days_p90"))]
+        return jsonify({"rows": json.loads(df.to_json(orient="records"))})
+
+    @app.get("/api/lines/analyses/<aid>/cycle")
+    def lines_cycle(aid):
+        try:
+            df = line_analysis.cycle(aid)
+        except KeyError as e:
+            return err(str(e), 404)
+        df = df[df["index"] == request.args.get("index", "FWI")]
+        return jsonify({"rows": json.loads(df.to_json(orient="records"))})
+
+    @app.get("/api/lines/analyses/<aid>/file/<name>")
+    def lines_file(aid, name):
+        try:
+            path = line_analysis.file(aid, name)
+        except KeyError as e:
+            return err(str(e), 404)
+        return send_file(path, as_attachment=request.args.get("inline") != "1", download_name=f"{aid}_{name}")
 
     @app.post("/api/shutdown")
     def shutdown():
