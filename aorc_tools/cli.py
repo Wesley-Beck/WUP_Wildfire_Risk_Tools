@@ -81,8 +81,12 @@ def points(shapefile, output, filter_water, water_min_area):
               help="Output format: sqlite (compact + web files), csv, or both")
 @click.option("--skip-raw/--no-skip-raw", default=False,
               help="Skip raw AORC output (saves ~30% time/space)")
+@click.option("--daylight", default="solar", type=click.Choice(["solar", "legacy-utc"]), show_default=True,
+              help="DMC/DC daylight test: per-point sun position (fixed) or the legacy UTC-hour test")
+@click.option("--fwi-coefficients", default="legacy", type=click.Choice(["legacy", "cffdrs-ng"]), show_default=True,
+              help="DMC/DC drying coefficients (open decision, see CLAUDE.md)")
 def extract(points_file, year, output, start_month, end_month,
-            fuel_model, fuel_moisture, latitude, output_format, skip_raw):
+            fuel_model, fuel_moisture, latitude, output_format, skip_raw, daylight, fwi_coefficients):
     """Extract hourly AORC data and compute fire danger indices."""
     from aorc_tools.point_filter import load_point_index
     from aorc_tools.extract import extract_year
@@ -103,9 +107,36 @@ def extract(points_file, year, output, start_month, end_month,
         latitude=latitude,
         output_format=output_format,
         skip_raw=skip_raw,
+        daylight=daylight,
+        fwi_coefficients=fwi_coefficients,
         callback=progress,
     )
     click.echo(f"Extraction complete for {year}")
+
+
+@main.command(context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.option("--source", "source_kind", default="auto", show_default=True,
+              type=click.Choice(["auto", "aorc", "synthetic"]),
+              help="auto = the real AORC archive if reachable, else demo weather")
+@click.option("--workspace", default=None, help="Folder for results, jobs and saved views")
+@click.option("--port", default=8765, show_default=True, type=int)
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--no-browser", is_flag=True, help="Do not open a browser window")
+@click.option("--points", "points_file", default=None, help="points_index.csv (default: bundled copy)")
+@click.option("--static-dir", default=None, help="NDVI / fuel-model inputs (default: data/static)")
+@click.option("--output", default=None, help="Legacy batch record folder (default: data/output)")
+@click.option("--max-cells", default=12000, show_default=True, type=int, help="Live-compute limit per request")
+def serve(source_kind, workspace, port, host, no_browser, points_file, static_dir, output, max_cells):
+    """Start the WUP Grid Explorer (same as `python -m aorc_tools.explorer`)."""
+    from aorc_tools.explorer.__main__ import main as explorer_main
+
+    argv = ["--source", source_kind, "--port", str(port), "--host", host, "--max-cells", str(max_cells)]
+    for flag, val in (("--workspace", workspace), ("--points", points_file), ("--static-dir", static_dir), ("--output", output)):
+        if val:
+            argv += [flag, val]
+    if no_browser:
+        argv.append("--no-browser")
+    sys.exit(explorer_main(argv))
 
 
 @main.command()

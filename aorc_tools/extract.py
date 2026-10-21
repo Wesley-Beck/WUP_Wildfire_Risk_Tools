@@ -98,7 +98,8 @@ def extract_month(year, month, points_df, output_base, loader=None,
                   fuel_model="G", fuel_moisture_method="emc",
                   fwi_state=None, fm_state=None, latitude=46.5,
                   callback=None, output_format="both",
-                  csv_precision=None, skip_raw=False):
+                  csv_precision=None, skip_raw=False,
+                  daylight="solar", fwi_coefficients="legacy"):
     """Extract one month of hourly AORC data and compute all indices.
 
     Uses parallel S3 prefetching: downloads the next day while processing
@@ -117,6 +118,11 @@ def extract_month(year, month, points_df, output_base, loader=None,
         output_format: "sqlite" | "csv" | "both" (default "both").
         csv_precision: Decimal places for CSV export (None = full precision).
         skip_raw: If True, skip saving raw AORC variables (saves ~30% time/space).
+        daylight: "solar" (default) -- DMC/DC dry when the sun is up at each
+            point at the packet's UTC instant (timebase.daylight_solar);
+            "legacy-utc" -- the original test (UTC hour vs solar sunrise/sunset
+            at ``latitude``), kept to reproduce pre-2026-10 outputs.
+        fwi_coefficients: "legacy" | "cffdrs-ng" DMC/DC drying coefficients.
 
     Returns:
         dict with "fwi_state" and "fm_state" for carry-forward.
@@ -156,7 +162,12 @@ def extract_month(year, month, points_df, output_base, loader=None,
     nfdrs_acc = CSVAccumulator(n_points, point_ids) if use_csv else None
 
     # Initialize fire index models
-    fwi = HourlyFWI(n_points, latitude=latitude, initial_state=fwi_state)
+    if daylight not in ("solar", "legacy-utc"):
+        raise ValueError("daylight must be 'solar' or 'legacy-utc'")
+    fwi = HourlyFWI(n_points, latitude=latitude, initial_state=fwi_state,
+                    coefficients=fwi_coefficients)
+    pt_lat = points_df["latitude"].values.astype(float)
+    pt_lon = points_df["longitude"].values.astype(float)
     fm_model = NelsonFuelMoisture(n_points, initial_fm=fm_state) if fuel_moisture_method == "nelson" else None
 
     import calendar
@@ -275,7 +286,12 @@ def extract_month(year, month, points_df, output_base, loader=None,
                         conv_acc.add(key, current, values)
 
                 # Canadian FWI
-                fwi_result = fwi.update(temp_c, rh, ws_kph, precip_mm, doy, current.hour)
+                if daylight == "solar":
+                    from aorc_tools.explorer.timebase import daylight_solar
+                    dl = daylight_solar(pt_lat, pt_lon, current)
+                else:
+                    dl = None
+                fwi_result = fwi.update(temp_c, rh, ws_kph, precip_mm, doy, current.hour, daylight=dl)
                 if db:
                     for key, values in fwi_result.items():
                         db.add(key, current, values)
@@ -346,6 +362,8 @@ def extract_month(year, month, points_df, output_base, loader=None,
         calculation_params={
             "fuel_moisture_method": fuel_moisture_method,
             "latitude": latitude,
+            "daylight": daylight,
+            "fwi_coefficients": fwi_coefficients,
             "n_points": n_points,
             "output_format": output_format,
         },

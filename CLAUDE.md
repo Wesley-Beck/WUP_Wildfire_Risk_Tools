@@ -20,6 +20,12 @@ COMPANION papers. Deadline: July 1, 2026 (no resubmission).
 - `docs/manuscript_draft_v4.md` — current draft
 - `scripts/verify_index_implementations.py` · `scripts/verify_computed_data.py` · `scripts/batch_compute_remaining_years.py`
 - `src/` — program1 (extraction) + wildfire_indices module
+- `aorc_tools/explorer/` — WUP Grid Explorer (`python -m aorc_tools.explorer`, `WUP_Explorer.bat`, one-file
+  `WUP_Explorer.exe` from `.github/workflows/build-explorer.yml` + `packaging/wup_explorer.spec`): map selection,
+  hourly chain with per-packet resolution tiers, NetCDF4 results store (int16+zlib, ~2 B/packet), resumable jobs,
+  coverage %, save/share, known-fire checks (`fires.py`, Fires tab, `--fire-checks`). Tests: `tests/test_explorer.py`.
+- `docs/validation/` + `scripts/compare_*.py` — this code vs official cffdrs-ng, xclim, NFDRS4 (see below).
+  `docs/existing_tools_comparison.md` — gridMET, CEMS/GEFF, NFDRS4, FWI2025, USGS FPI, Argonne.
 - `data/points/` — AORC points CSV + shapefiles (committed; small)
 - `data/output/`, `data/cache/`, `data/raw/` — NOT in git (see .gitignore); local only
 
@@ -40,6 +46,52 @@ COMPANION papers. Deadline: July 1, 2026 (no resubmission).
   Klaver 1998. Real-NDVI FPI for the full record is NOT attempted here.
 - **ERC / BI = DERIVED (simplified), reported as PERCENTILES, honestly labeled** (NOT cited as NFDRS).
   Stop clipping to 0-100 (they are open-ended). Confirmed by Wesley.
+
+## FWI hourly chain (RESOLVED in the explorer 2026-10-20 — confirm for the batch record)
+Checked against NRCan's official cffdrs-ng output (`NG_FWI.py` @ ed143d7, PRF2007 reference, 2,623 h;
+`scripts/compare_with_cffdrs_ng.py`, `docs/validation/`):
+- The legacy hourly port in `fwi.py` (used by `extract.py` for the existing 1979–2002 record) is wrong in three ways:
+  - daily-system DMC/DC drying coefficients applied hourly;
+  - rain total reset every dry hour;
+  - no 0.5 mm FFMC interception.
+- Effect: mean DMC 0.36 vs 17.45, mean DC 1,529 vs 136, FWI r = 0.62.
+- `HourlyFWI(coefficients="cffdrs-ng")` now also implements cffdrs-ng's rain handling (canopy total reset after 5 dry
+  hours, prec_effective for FFMC/DMC/DC). It reproduces the reference EXACTLY (< 1e-4). The explorer default is
+  cffdrs-ng.
+- Per-cell sun-position daylight (explorer) vs cffdrs-ng LST sunrise/sunset: FWI ≤ 0.05 difference.
+- `extract.py` still defaults to legacy (`--fwi-coefficients`). DECIDE: recompute the batch record with cffdrs-ng
+  (recommended; its FWI is not usable as is) and pin the commit.
+
+Classic DAILY FWI is now also computed in the explorer (`fire_indices/fwi_daily.py`, step `FWI_daily`, 12:00 LST per
+cell, 24 h rain to noon). It equals xclim `cffwis_indices` exactly (`scripts/compare_daily_fwi_xclim.py`), i.e. the
+CWFIS/GEFF/Argonne-comparable form. Report both: hourly FWI2025 (novel) and classic daily (comparator).
+
+## ERC/BI vs NFDRS 2016 (checked 2026-10-20, `scripts/compare_with_nfdrs4.py`)
+Setup: NFDRS4 @ 84223b9, sample RAWS 2001–2017, fuel model G (NFDRS4 custom "C").
+- Our ERC/BI EQUATIONS reproduce NFDRS4 when fed its moistures (ρ = 1.000 / 0.997).
+- The explorer's timelag dead-fuel moisture gives fire-season ρ 0.90 (ERC) / 0.87 (BI) and ~10 percentile points
+  mean difference; 62 % of NFDRS4 top-decile days are also top-decile here.
+- Live moisture barely matters for G.
+- So "derived, reported as percentiles" stands. To close the gap: Nelson dead-fuel moisture. NFDRS4's
+  `deadfuelmoisture.cpp` is GPL-2.0+ (NFDRS4 itself public domain) and this repo has no license → licensing decision
+  before porting/linking; calling the unmodified NFDRS4 CLI is the alternative.
+
+## Known-fire checks (explorer Fires tab / `--fire-checks`)
+- Seed catalog `aorc_tools/explorer/static/geo/wup_fires.geojson`: Pinery 2009 (DNR/NIFC; carries the earlier real-run
+  reference values), Summit Lake 2024 (WFIGS, 328 ac, natural), three small WFIGS fires, three Oct-2026 fires without
+  published coordinates.
+- Import NIFC/MTBS/DNR files for more.
+- What a check reports: discovery-day values at 3×3 cells, plus the percentile rank among the same Apr–Oct season's
+  days (needs that season saved: one job).
+- These are case checks, not skill (companion paper).
+- This cloud workspace cannot reach S3 (proxy 403), so real values come from Wes's machine: `Run_Fire_Checks.bat`.
+
+## Yu et al. 2023 (Argonne) — check before citing
+Per the paper text:
+- Historical indices used gridMET ~4 km (12 km was the WRF future run).
+- Fire-size correlations were weak (ρ < 0.32 at grid/daily) but positive and significant; regional values only in
+  Fig. 3.
+- The draft's "computed at 12 km" and "reportedly negative" need checking against Fig. 3.
 
 ## Percentile methodology (for ERC/BI; optional for FWI/FPI cross-comparison)
 Raw per-year index values are the canonical durable outputs; percentiles are a cheap post-pass

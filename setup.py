@@ -6,7 +6,9 @@ setup(
     description="AORC-based wildfire risk analysis for the Western Upper Peninsula of Michigan",
     author="R2I2 Winter Resilience",
     packages=find_packages(),
-    python_requires=">=3.9",
+    python_requires=">=3.10",
+    include_package_data=True,
+    package_data={"aorc_tools.explorer": ["static/*", "static/**/*", "static/vendor/*", "static/js/*", "static/geo/*"]},
     install_requires=[
         "xarray>=2023.0",
         "zarr>=2.14",
@@ -24,10 +26,15 @@ setup(
         "tqdm>=4.65",
         "click>=8.1",
         "astral>=3.2",
+        "flask>=3.0",
+        "netCDF4>=1.6",
+        "tzdata>=2023.3",
+        "openpyxl>=3.1",
     ],
     entry_points={
         "console_scripts": [
             "aorc-tools=aorc_tools.cli:main",
+            "wup-explorer=aorc_tools.explorer.__main__:main",
         ],
     },
 )

@@ -32,7 +32,7 @@ from aorc_tools.climate_convert import equilibrium_moisture_content
 logger = logging.getLogger(__name__)
 
 
-def compute_fpi(nd0, nd_min, nd_max, llfm, dlfm, mxd, tmax_f, rh_min):
+def compute_fpi(nd0, nd_min, nd_max, llfm, dlfm, mxd, tmax_f, rh_min, fm10=None):
     """Compute Fire Potential Index (Burgan 1998, Argonne implementation).
 
     Ported directly from Argonne's FPI code. All array inputs must have
@@ -47,6 +47,11 @@ def compute_fpi(nd0, nd_min, nd_max, llfm, dlfm, mxd, tmax_f, rh_min):
         mxd: Dead fuel moisture of extinction (array, %).
         tmax_f: Daily maximum temperature in °F (array).
         rh_min: Daily minimum relative humidity in % (array).
+        fm10: Optional 10-h dead fuel moisture (%) supplied directly, e.g. an
+            hourly timelag value. When given, steps 3-4 (EMC from Tmax/RHmin
+            and FM10 = 1.28*EMC) are skipped, EMC is returned as NaN, and
+            ``tmax_f``/``rh_min`` are ignored. This is the explorer's hourly
+            adaptation; the Burgan/Argonne daily form is the default.
 
     Returns:
         dict with keys:
@@ -87,13 +92,17 @@ def compute_fpi(nd0, nd_min, nd_max, llfm, dlfm, mxd, tmax_f, rh_min):
     # =========================================================================
     # Step 3: EMC from Simard 1968 (same as existing code, Argonne-exact)
     # =========================================================================
-    emc = equilibrium_moisture_content(tmax_f, rh_min)
-    emc = np.maximum(emc, 0.0)
+    if fm10 is None:
+        emc = equilibrium_moisture_content(tmax_f, rh_min)
+        emc = np.maximum(emc, 0.0)
 
-    # =========================================================================
-    # Step 4: 10-hr fuel moisture (Argonne-exact)
-    # =========================================================================
-    fm10 = emc * 1.28
+        # =====================================================================
+        # Step 4: 10-hr fuel moisture (Argonne-exact)
+        # =====================================================================
+        fm10 = emc * 1.28
+    else:
+        fm10 = np.asarray(fm10, dtype=np.float64)
+        emc = np.full(np.shape(fm10), np.nan)
 
     # =========================================================================
     # Step 5: Dead fuel tension (ratio to moisture of extinction)

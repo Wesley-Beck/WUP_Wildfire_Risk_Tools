@@ -1,0 +1,271 @@
+{
+ "station": "RAWS 241513 (NFDRS4 sample), 2001-2017 hourly, 46.82 N",
+ "fuel_model": "NFDRS-88 G (NFDRS4 custom C)",
+ "hours": 142342,
+ "nfdrs4_live_moisture": {
+  "HerbLFM_mean": 35.04881529295307,
+  "WoodyLFM_mean": 54.69359769316803,
+  "HerbLFM_AprOct_13LST_range": [
+   30.0,
+   198.5624072025
+  ]
+ },
+ "results": {
+  "explorer": {
+   "ERC": {
+    "hourly_all": {
+     "n": 142342,
+     "pearson_r": 0.9098209923300625,
+     "spearman_rho": 0.8568515933284743,
+     "mean_abs_percentile_diff": 11.152521816970811,
+     "top10pct_hit_rate": 0.7678094702824224,
+     "ref_mean": 19.28072072894859,
+     "got_mean": 33.335052198226805
+    },
+    "daily_13LST_all": {
+     "n": 5912,
+     "pearson_r": 0.9105300723639885,
+     "spearman_rho": 0.8659085561265956,
+     "mean_abs_percentile_diff": 10.948766962815933,
+     "top10pct_hit_rate": 0.7072758037225042,
+     "ref_mean": 20.397648849797026,
+     "got_mean": 35.018606224627874
+    },
+    "daily_13LST_AprOct": {
+     "n": 3560,
+     "pearson_r": 0.8873228472872406,
+     "spearman_rho": 0.9002335360404041,
+     "mean_abs_percentile_diff": 10.079180343390986,
+     "top10pct_hit_rate": 0.6246498599439776,
+     "ref_mean": 31.24795224719101,
+     "got_mean": 43.521067415730336
+    }
+   },
+   "BI": {
+    "hourly_all": {
+     "n": 142342,
+     "pearson_r": 0.7891248605152239,
+     "spearman_rho": 0.7916045250152028,
+     "mean_abs_percentile_diff": 12.967600863956466,
+     "top10pct_hit_rate": 0.8070089191656717,
+     "ref_mean": 13.197559047926825,
+     "got_mean": 17.19381264111442
+    },
+    "daily_13LST_all": {
+     "n": 5912,
+     "pearson_r": 0.7917676365531381,
+     "spearman_rho": 0.8177895391274858,
+     "mean_abs_percentile_diff": 11.928406204852038,
+     "top10pct_hit_rate": 0.7601351351351351,
+     "ref_mean": 16.783684032476316,
+     "got_mean": 22.07436767008389
+    },
+    "daily_13LST_AprOct": {
+     "n": 3560,
+     "pearson_r": 0.7768792954597865,
+     "spearman_rho": 0.8652849257546413,
+     "mean_abs_percentile_diff": 9.743592980684257,
+     "top10pct_hit_rate": 0.7170868347338936,
+     "ref_mean": 26.37050842696629,
+     "got_mean": 26.272506803006607
+    }
+   },
+   "dead_fm_vs_nfdrs4": {
+    "fm1": {
+     "n": 142342,
+     "pearson_r": 0.7145527051421594,
+     "spearman_rho": 0.7383260501611421,
+     "mean_abs_percentile_diff": 14.834104243546127,
+     "top10pct_hit_rate": 0.3863573977491079,
+     "ref_mean": 23.057349328309712,
+     "got_mean": 14.741880873226743
+    },
+    "fm10": {
+     "n": 142342,
+     "pearson_r": 0.7643668369731389,
+     "spearman_rho": 0.7898722730601373,
+     "mean_abs_percentile_diff": 13.53521568823968,
+     "top10pct_hit_rate": 0.28721011946591707,
+     "ref_mean": 19.48552262482471,
+     "got_mean": 14.741140951899729
+    },
+    "fm100": {
+     "n": 142342,
+     "pearson_r": 0.837379927636503,
+     "spearman_rho": 0.8122125364049161,
+     "mean_abs_percentile_diff": 12.486725359153503,
+     "top10pct_hit_rate": 0.4225699584126313,
+     "ref_mean": 18.398421695784247,
+     "got_mean": 14.735321640357531
+    },
+    "fm1000": {
+     "n": 142342,
+     "pearson_r": 0.8468415414013115,
+     "spearman_rho": 0.8493473354966647,
+     "mean_abs_percentile_diff": 12.47756796530482,
+     "top10pct_hit_rate": 0.3515981735159817,
+     "ref_mean": 18.437296692838032,
+     "got_mean": 14.712757054977441
+    }
+   }
+  },
+  "legacy-emc": {
+   "ERC": {
+    "hourly_all": {
+     "n": 142342,
+     "pearson_r": 0.6779096594065521,
+     "spearman_rho": 0.6024656044503571,
+     "mean_abs_percentile_diff": 19.40883421027277,
+     "top10pct_hit_rate": 0.5066039061402277,
+     "ref_mean": 19.28072072894859,
+     "got_mean": 19.610389062961037
+    },
+    "daily_13LST_all": {
+     "n": 5912,
+     "pearson_r": 0.7874459257746766,
+     "spearman_rho": 0.7318240128464254,
+     "mean_abs_percentile_diff": 15.874186421141104,
+     "top10pct_hit_rate": 0.5939086294416244,
+     "ref_mean": 20.397648849797026,
+     "got_mean": 35.24543301759134
+    },
+    "daily_13LST_AprOct": {
+     "n": 3560,
+     "pearson_r": 0.7556928441103765,
+     "spearman_rho": 0.7741991446612719,
+     "mean_abs_percentile_diff": 14.487880318141649,
+     "top10pct_hit_rate": 0.4649859943977591,
+     "ref_mean": 31.24795224719101,
+     "got_mean": 47.233988764044945
+    }
+   },
+   "BI": {
+    "hourly_all": {
+     "n": 142342,
+     "pearson_r": 0.7548872586359935,
+     "spearman_rho": 0.7090046506410279,
+     "mean_abs_percentile_diff": 13.877539282486907,
+     "top10pct_hit_rate": 0.7209073670903856,
+     "ref_mean": 13.197559047926825,
+     "got_mean": 12.045207338129966
+    },
+    "daily_13LST_all": {
+     "n": 5912,
+     "pearson_r": 0.7563854482957735,
+     "spearman_rho": 0.7791588761288392,
+     "mean_abs_percentile_diff": 13.787609568209243,
+     "top10pct_hit_rate": 0.6824324324324325,
+     "ref_mean": 16.783684032476316,
+     "got_mean": 21.388571232500528
+    },
+    "daily_13LST_AprOct": {
+     "n": 3560,
+     "pearson_r": 0.7849827512603871,
+     "spearman_rho": 0.8244264832627923,
+     "mean_abs_percentile_diff": 11.756998800656483,
+     "top10pct_hit_rate": 0.6834733893557423,
+     "ref_mean": 26.37050842696629,
+     "got_mean": 27.10675388533016
+    }
+   },
+   "dead_fm_vs_nfdrs4": {
+    "fm1": {
+     "n": 142342,
+     "pearson_r": 0.6985454005506677,
+     "spearman_rho": 0.7227366485178606,
+     "mean_abs_percentile_diff": 15.792447713283567,
+     "top10pct_hit_rate": 0.3676914630798792,
+     "ref_mean": 23.057349328309712,
+     "got_mean": 14.700811172809148
+    },
+    "fm10": {
+     "n": 142342,
+     "pearson_r": 0.6145224638615943,
+     "spearman_rho": 0.6299547345321125,
+     "mean_abs_percentile_diff": 19.685211634757273,
+     "top10pct_hit_rate": 0.32059030217849616,
+     "ref_mean": 19.48552262482471,
+     "got_mean": 18.817038301195712
+    },
+    "fm100": {
+     "n": 142342,
+     "pearson_r": 0.5211069721941796,
+     "spearman_rho": 0.5165453292046185,
+     "mean_abs_percentile_diff": 22.205030347314842,
+     "top10pct_hit_rate": 0.2857545640374991,
+     "ref_mean": 18.398421695784247,
+     "got_mean": 22.051216759213723
+    },
+    "fm1000": {
+     "n": 142342,
+     "pearson_r": 0.4807731299550596,
+     "spearman_rho": 0.47268482325894606,
+     "mean_abs_percentile_diff": 23.137178847249437,
+     "top10pct_hit_rate": 0.19367755532139094,
+     "ref_mean": 18.437296692838032,
+     "got_mean": 26.461460111056468
+    }
+   }
+  },
+  "formula-only": {
+   "ERC": {
+    "hourly_all": {
+     "n": 142342,
+     "pearson_r": 0.9998721896661387,
+     "spearman_rho": 0.9920741121809888,
+     "mean_abs_percentile_diff": 1.9262938910884588,
+     "top10pct_hit_rate": 0.9990164395110299,
+     "ref_mean": 19.28072072894859,
+     "got_mean": 19.309472959491927
+    },
+    "daily_13LST_all": {
+     "n": 5912,
+     "pearson_r": 0.9998689440280768,
+     "spearman_rho": 0.9920879170517327,
+     "mean_abs_percentile_diff": 1.932198290305628,
+     "top10pct_hit_rate": 0.9526226734348562,
+     "ref_mean": 20.397648849797026,
+     "got_mean": 20.41914749661705
+    },
+    "daily_13LST_AprOct": {
+     "n": 3560,
+     "pearson_r": 0.9997596059120373,
+     "spearman_rho": 0.9997193119379042,
+     "mean_abs_percentile_diff": 0.5087662542608257,
+     "top10pct_hit_rate": 0.9663865546218487,
+     "ref_mean": 31.24795224719101,
+     "got_mean": 31.28932584269663
+    }
+   },
+   "BI": {
+    "hourly_all": {
+     "n": 142342,
+     "pearson_r": 0.999182407829284,
+     "spearman_rho": 0.999139945196839,
+     "mean_abs_percentile_diff": 0.4155294659809429,
+     "top10pct_hit_rate": 0.9816700610997964,
+     "ref_mean": 13.197559047926825,
+     "got_mean": 13.059287863175937
+    },
+    "daily_13LST_all": {
+     "n": 5912,
+     "pearson_r": 0.9990809653309622,
+     "spearman_rho": 0.9987112299313952,
+     "mean_abs_percentile_diff": 0.5599749185620037,
+     "top10pct_hit_rate": 0.9746621621621622,
+     "ref_mean": 16.783684032476316,
+     "got_mean": 16.60569494185215
+    },
+    "daily_13LST_AprOct": {
+     "n": 3560,
+     "pearson_r": 0.9979141695378629,
+     "spearman_rho": 0.9967309234978825,
+     "mean_abs_percentile_diff": 1.2280804191389978,
+     "top10pct_hit_rate": 0.9859943977591037,
+     "ref_mean": 26.37050842696629,
+     "got_mean": 26.07540604262509
+    }
+   }
+  }
+ }
+}

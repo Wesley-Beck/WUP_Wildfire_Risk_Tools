@@ -36,3 +36,12 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Grid explorer brick cache (large, regenerable)
+data/cache/
+
+# Explorer workspace (results, jobs, saved views) and packaging output
+WUP_Explorer_data/
+.venv/
+build/
+dist/

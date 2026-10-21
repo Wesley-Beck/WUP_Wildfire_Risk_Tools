@@ -17,7 +17,8 @@ Western Upper Peninsula of Michigan.
 7. [Fuel Model Selection](#fuel-model-selection)
 8. [Fuel Moisture Methods](#fuel-moisture-methods)
 9. [Adding NDVI Data for FPI](#adding-ndvi-data-for-fpi)
-10. [Troubleshooting](#troubleshooting)
+10. [Grid Explorer (aorc-tools serve)](#grid-explorer-aorc-tools-serve)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -153,6 +154,21 @@ Extract hourly AORC data and compute fire danger indices for all points.
 ### `aorc-tools status`
 
 Check AORC S3 connectivity and report grid dimensions. No arguments.
+
+### `aorc-tools serve`
+
+Start the grid explorer (JSON API + `website/explorer.html`).
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--source` | `synthetic` | `synthetic` = demo weather, no network; `aorc` = NOAA AORC v1.1 on S3 |
+| `--points` | `data/output/points_index.csv` | Point index |
+| `--output` | `data/output` | Where the batch record (`data_{year}_{month}.db`) lives |
+| `--static-dir` | `data/static` | FPI NDVI inputs (see [Adding NDVI Data](#adding-ndvi-data-for-fpi)) |
+| `--climatology` | `data/climatology/percentiles.json` | Percentile reference built by `scripts/build_percentile_climatology.py` |
+| `--cache-dir` / `--cache-max-gb` | `data/cache/bricks` / `8` | On-disk cache of fetched AORC bricks (LRU) |
+| `--max-cells` / `--max-hours` | `12000` / `1488` | On-demand compute limits per request |
+| `--host` / `--port` | `127.0.0.1` / `8765` | Bind address |
 
 ---
 
@@ -385,6 +401,133 @@ data/static/ndvi/
 ```
 
 The system will auto-detect these files when running FPI calculations.
+
+---
+
+## WUP Grid Explorer
+
+A map-based tool for computing and viewing the four indices for any AORC cell, any hours, with every
+calculation step visible. Results are saved as you go, so you can close it and pick up later.
+
+### Starting it
+
+| How | Command | Notes |
+|---|---|---|
+| **One file, no Python** | double-click `WUP_Explorer.exe` | Built by the *Build WUP Explorer* GitHub Action (Actions tab → Run workflow → download `WUP_Explorer-Windows`). macOS/Linux builds come from the same workflow. |
+| **Double-click, from this folder** | `WUP_Explorer.bat` (Windows) · `WUP_Explorer.command` (macOS) · `./wup_explorer.sh` (Linux) | The first run makes a private `.venv` and installs `requirements-explorer.txt`. Later runs start in seconds. |
+| **Python** | `python -m aorc_tools.explorer` (or `aorc-tools serve`, `wup-explorer`) | Options: `--source auto\|aorc\|synthetic`, `--workspace DIR`, `--port 8765`, `--no-browser` |
+
+The browser opens at http://127.0.0.1:8765/.
+- **Data source:** with `--source auto` (the default), the explorer uses the real NOAA AORC archive on S3
+  if it can reach it, otherwise clearly labelled synthetic demo weather. The source badge switches it.
+- **Running twice:** starting it again while it is already running just opens the browser.
+- **Saved data:** everything goes to `WUP_Explorer_data/` next to the program (results, jobs, saved
+  views, exports).
+
+### Vocabulary
+
+| Term | Meaning |
+|---|---|
+| **cell** | one AORC grid cell, 1/120° (~930 m N–S × ~640 m E–W at 47° N), identified by `point_id` |
+| **brick** | one Zarr chunk: 144 h × 128 × 256 cells. The unit S3 serves; 5 bricks cover the WUP. |
+| **packet** | one cell at one hour, the smallest unit of calculation |
+| **job** | "compute these bricks over this period and save every packet"; resumable |
+
+### What it computes (default configuration `hourly-default`)
+
+- **FWI, hourly (FWI2025):** identical to NRCan's cffdrs-ng reference code (`docs/validation`).
+  - DMC/DC dry only while the sun is up at that cell. Daylight comes from the sun's position at the packet's UTC instant.
+  - FFMC has the 0.5 mm canopy interception.
+- **FWI, classic daily:** Van Wagner (1987), identical to xclim.
+  - Updated once per cell at 12:00 local standard time from noon weather and the 24 h rain.
+  - This is the form CWFIS, Copernicus/GEFF and the Argonne study report.
+- **ERC, BI:** NFDRS-88 equations (default fuel model G) on hourly timelag dead-fuel moisture.
+  - The equations reproduce NFDRS4. The dead-fuel moisture model is simpler than NFDRS 2016's Nelson
+    model, so these are reported as percentiles (`docs/validation`).
+- **FPI:** Burgan (1998).
+  - MODIS NDVI, 2000 onward.
+  - Hourly 10-h fuel moisture × daily greenness.
+- **Resolution ladder:** each packet uses its own cell-hour value when it exists. Otherwise, in order: the
+  same cell ±3 h (not for rain), the 3×3 mean, 7×7, the brick mean, then "unavailable". The tier is saved
+  with every packet.
+- **Time basis:**
+  - AORC stamps are UTC.
+  - Gogebic and Iron cells use Central time (UTC−6 standard), the others Eastern (UTC−5).
+  - Daily views use each cell's local standard day.
+  - Daylight saving only changes what the clock shows.
+  - See the *Time & daylight* tab.
+
+Other configurations are one click away in the Calculation panel:
+- the legacy hourly port and legacy UTC daylight test, to reproduce the old batch record;
+- EMC fuel moisture;
+- daily-Burgan FPI;
+- another fuel model.
+
+Results are stored per configuration.
+
+### Using it
+
+1. **Select area.**
+   - **Cell** (shift-click adds), **Box**, **Brick**, **County**, or **Entire WUP**.
+   - **Import** a GeoJSON polygon, a saved selection or view, or a snapshot.
+2. **Time window.** Start (UTC), the number of hourly packets, and the spin-up for live runs.
+3. **Show** reads saved results if they cover the window, otherwise computes them now. **Explore live**
+   always computes and adds comparison overlays. **Calculate & save** queues a background job for the
+   selection's bricks.
+4. **Index tabs (FWI, FPI, ERC, BI).**
+   - Hourly, daily-max or daily-at-obs-hour charts, raw or percentile values.
+   - Overlays: classic daily FWI, other daylight basis, other FWI port, other moisture model.
+   - Under each chart, every step for the focused cell at the selected packet, with its formula, source
+     and effective resolution for that year.
+5. **Fires.** See below.
+6. **Coverage** shows what percentage of all packets is saved, by index, year × month, brick and tier.
+   **Jobs** runs and resumes background calculations. **Save & share** holds links, saved views,
+   snapshots, CSV/NetCDF/GeoJSON exports and the workspace file list.
+
+### Known-fire checks (Fires tab)
+
+The tab answers "do the numbers make sense where real fires started?"
+
+1. Pick a fire (table, or a yellow dot on the map) and press **Check this fire**. You get FWI (hourly and
+   daily), FPI, ERC and BI at the fire's cells (3×3 around the point of origin, or the perimeter) on the
+   discovery day: at the discovery hour when it is known, as the day's maximum, and as the maximum over
+   the 3 days before.
+2. **Calculate this season** queues one job (that brick, April–October of the fire's year). After it, the
+   check also ranks the discovery day among all days of that season at those cells: 80th, 90th and 97th
+   percentiles are flagged.
+3. **Reference checks:** values recorded with a fire (for example the earlier real-AORC Pinery numbers)
+   are compared automatically.
+4. **Import fires…** takes CSV, Excel or GeoJSON from NIFC (WFIGS/InFORM, including shapefile-truncated
+   names such as `FireDiscov`, `IncidentSi`, `InitialLat`), MTBS or Michigan DNR. Records outside the WUP
+   are skipped. For fires without coordinates, use **Set location** and click the map.
+5. **Check all & save report** writes `wup_fire_checks_*.html/.csv/.json` to `WUP_Explorer_data/exports`.
+
+Without the browser, the same run is one command. It computes every fire's season, skips anything
+already saved, checks every fire, and writes the reports:
+
+```bat
+Run_Fire_Checks.bat                         :: or: WUP_Explorer.exe --fire-checks
+WUP_Explorer.exe --fire-checks --fires pinery-2009,summit-lake-2024
+```
+
+These are case checks, not a skill score: one fire on one day says little on its own. A skill test needs
+every day with and without fires, which is the companion paper.
+
+### Results files
+
+- One NetCDF4 (CF-1.8) file per 144 h time chunk covering the whole WUP rectangle:
+  `WUP_Explorer_data/results/<source>/<config>/<year>/WUP_FDI_<year>_k<chunk>_<date>.nc`.
+- Variables: `FWI`, `FWI_daily`, `FPI`, `ERC`, `BI` as int16 with scale factors, zlib-compressed;
+  `wx_tier` and `ndvi_tier`; and the chain state in the group `chain_state`.
+- About 2 bytes per packet for all indices together.
+- Open any file in Panoply, QGIS or `xarray.open_dataset`.
+- *Coverage › Export year* merges a year into one hourly file plus one daily file (daily maxima over the
+  local standard day, and `FWI_daily_noon`).
+
+### Validation and comparison with other tools
+
+See `docs/validation/README.md` (reproducible with `scripts/compare_*.py`) and
+`docs/existing_tools_comparison.md`. Both are also summarised in the explorer's *Data flow* tab.
 
 ---
 

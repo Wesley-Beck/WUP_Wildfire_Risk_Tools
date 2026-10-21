@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WUP Grid Explorer</title>
+<meta name="description" content="Hourly fire-danger indices (FWI, FPI, ERC, BI) for every 800 m AORC cell in Michigan's Western Upper Peninsula — select areas, compute and save results, and see every pipeline step.">
+<link rel="stylesheet" href="static/vendor/maplibre-gl.css">
+<link rel="stylesheet" href="static/app.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <div style="min-width:0">
+      <h1>WUP Grid Explorer</h1>
+      <div class="sub">AORC 800 m cells · hourly packets · FWI / FPI / ERC / BI · every step traced</div>
+    </div>
+    <span class="pill" id="srcpill" title="Data source — click to switch">connecting…</span>
+    <span class="pill" id="covpill" title="Share of all packets (cells × hours, 1979→) calculated and saved for the active configuration">—</span>
+    <span class="pill" id="jobpill" title="Background calculation jobs" style="display:none"></span>
+    <div class="hdr-right">
+      <button class="btn sm" id="b-share" title="Copy a link that reopens this exact view">Copy link</button>
+      <button class="btn sm" id="b-savesession" title="Save this view to the workspace">Save view</button>
+      <button class="btn sm" id="b-snapshot" title="Download a self-contained HTML report of this view">Snapshot</button>
+      <button class="btn sm ghost" id="b-quit" title="Stop the explorer (jobs resume next time)">Quit</button>
+    </div>
+  </header>
+  <div id="main">
+    <aside id="left">
+      <details class="panel" open>
+        <summary>1 · Select area</summary>
+        <div class="pbody">
+          <div class="seg" id="modeseg">
+            <button class="btn active" data-mode="cell" title="Click a cell; shift-click adds">Cell</button>
+            <button class="btn" data-mode="box" title="Drag a rectangle">Box</button>
+            <button class="btn" data-mode="brick" title="Click: the whole Zarr brick (S3 unit)">Brick</button>
+            <button class="btn" data-mode="county" title="Click: the whole county">County</button>
+            <button class="btn" data-mode="all" title="Every cell: view stored results as a map">Entire WUP</button>
+          </div>
+          <div class="row">
+            <button class="btn sm" id="b-clear">Clear</button>
+            <select id="savedsel" title="Saved selections"><option value="">Saved selections…</option></select>
+            <label class="btn sm" title="Import a GeoJSON polygon, a saved selection/view (.json) or a snapshot (.html)">Import<input type="file" id="importfile" accept=".json,.geojson,.html" hidden></label>
+          </div>
+          <dl class="kv" id="selsum"></dl>
+          <p class="hint" id="selhint"></p>
+          <div class="row">
+            <label class="chk"><input type="checkbox" id="ly-bricks" checked> bricks</label>
+            <label class="chk"><input type="checkbox" id="ly-mesh" checked> cell mesh</label>
+            <label class="chk"><input type="checkbox" id="ly-counties" checked> counties</label>
+            <label class="chk"><input type="checkbox" id="ly-tz"> time zones</label>
+            <label class="chk"><input type="checkbox" id="ly-cov"> coverage</label>
+            <label class="chk"><input type="checkbox" id="ly-fires" checked> known fires</label>
+          </div>
+        </div>
+      </details>
+
+      <details class="panel" open>
+        <summary>2 · Time window</summary>
+        <div class="pbody">
+          <div class="row"><label for="t-date">Start (UTC)</label><input type="date" id="t-date" value="2009-05-13"><select id="t-hour"></select></div>
+          <div class="row"><label for="t-hours">Packets</label><input type="number" id="t-hours" min="1" value="216"><span class="hint">hours per cell</span></div>
+          <div class="seg" id="hourpresets">
+            <button class="btn sm" data-hours="24">1 d</button><button class="btn sm" data-hours="72">3 d</button><button class="btn sm" data-hours="168">7 d</button>
+            <button class="btn sm" data-hours="744">31 d</button><button class="btn sm" data-hours="2208">92 d</button>
+          </div>
+          <div class="row"><label for="t-spin">Spin-up</label><input type="number" id="t-spin" min="0" max="1440" step="24" value="168"><span class="hint">h of warm-up for live runs</span></div>
+          <div class="row"><label>Ends</label><span class="mono" id="t-end"></span></div>
+          <div class="row"><label for="t-show">Show times in</label>
+            <select id="t-show"><option value="utc">UTC</option><option value="clock">Local clock (EDT/CDT…)</option><option value="lst">Local standard time</option></select></div>
+          <div class="seg"><button class="btn sm" id="preset-pinery" title="Baraga County, discovered 2009-05-20">Pinery Fire window</button></div>
+        </div>
+      </details>
+
+      <details class="panel" open>
+        <summary>3 · Calculation</summary>
+        <div class="pbody">
+          <div class="row" id="fdichecks"></div>
+          <div class="row"><label for="c-fuel">Fuel model</label><select id="c-fuel"></select></div>
+          <div class="row"><label for="c-fm">Dead-fuel moisture</label><select id="c-fm"><option value="timelag">Timelag 1/10/100/1000 h (hourly)</option><option value="emc">EMC multipliers (legacy)</option></select></div>
+          <div class="row"><label for="c-dl">Daylight (DMC/DC)</label><select id="c-dl"><option value="solar">Sun position per cell (fixed)</option><option value="legacy-utc">Legacy UTC-hour test</option></select></div>
+          <div class="row"><label for="c-coef">Hourly FWI</label><select id="c-coef"><option value="cffdrs-ng">cffdrs-ng / FWI2025 (official, verified)</option><option value="legacy">legacy port (old batch record)</option></select><span class="tag" title="cffdrs-ng mode reproduces NRCan's reference output exactly (docs/validation); the legacy port does not">verified</span></div>
+          <div class="row"><label for="c-fpi">FPI moisture</label><select id="c-fpi"><option value="hourly">Hourly 10-h timelag</option><option value="daily-burgan">Daily Burgan (Tmax/RHmin)</option></select></div>
+          <div class="row"><label class="chk"><input type="checkbox" id="c-gap" checked> fill gaps with the resolution ladder</label></div>
+          <div class="row"><label class="chk" title="Outside the locked FPI decision (MODIS era only)"><input type="checkbox" id="c-clim"> allow climatological NDVI (pre-2000 FPI)</label></div>
+          <div class="row"><span class="hint">config <span class="mono" id="c-id"></span></span><button class="btn sm ghost" id="c-reset">project default</button><button class="btn sm ghost" id="c-legacy">legacy batch</button></div>
+          <div class="seg" style="margin-top:8px">
+            <button class="btn primary grow" id="b-show" title="Use saved results when they exist, otherwise compute live">Show</button>
+            <button class="btn grow" id="b-live" title="Compute now, with comparison overlays">Explore live</button>
+            <button class="btn grow" id="b-job" title="Compute in the background and save to the workspace">Calculate &amp; save</button>
+          </div>
+          <p class="hint" id="runmsg"></p>
+        </div>
+      </details>
+
+      <details class="panel" open>
+        <summary>4 · Map colour</summary>
+        <div class="pbody">
+          <div class="row"><label for="m-var">Index</label><select id="m-var"><option>FWI</option><option>FPI</option><option>ERC</option><option>BI</option><option value="wx_tier">weather tier</option><option value="ndvi_tier">NDVI tier</option></select>
+            <select id="m-mode"><option value="raw">raw value</option><option value="pct">percentile</option></select></div>
+          <div class="row"><label for="m-hour">Packet</label><input type="range" id="m-hour" min="0" max="0" value="0" class="grow"><button class="btn sm" id="m-play" title="Play">▶</button></div>
+          <div class="row"><span class="mono" id="m-time"></span></div>
+          <div class="row"><label class="chk"><input type="checkbox" id="m-online" checked> online basemap</label></div>
+        </div>
+      </details>
+
+      <details class="panel">
+        <summary>Cell under cursor</summary>
+        <div class="pbody"><dl class="kv" id="cellinfo"><dt>—</dt><dd>hover the map</dd></dl></div>
+      </details>
+    </aside>
+
+    <div id="map">
+      <div id="maptools">
+        <button class="btn sm" id="b-fit" title="Zoom to the study area">⌂ fit</button>
+        <button class="btn sm" id="b-mappng" title="Download the map as PNG">⤓ PNG</button>
+      </div>
+      <div id="banner"></div>
+      <div id="boxsel"></div>
+      <div id="legend"><div id="legend-title">no layer</div><div class="bar" id="legend-bar"></div><div class="lab"><span id="legend-min"></span><span id="legend-mid"></span><span id="legend-max"></span></div><div id="legend-extra" class="hint"></div></div>
+    </div>
+
+    <aside id="right">
+      <div class="tabs" id="tabs">
+        <div class="tab active" data-tab="FWI" style="--tabc:var(--fwi)"><span class="dot" style="background:var(--fwi)"></span>FWI</div>
+        <div class="tab" data-tab="FPI" style="--tabc:var(--fpi)"><span class="dot" style="background:var(--fpi)"></span>FPI</div>
+        <div class="tab" data-tab="ERC" style="--tabc:var(--erc)"><span class="dot" style="background:var(--erc)"></span>ERC</div>
+        <div class="tab" data-tab="BI" style="--tabc:var(--bi)"><span class="dot" style="background:var(--bi)"></span>BI</div>
+        <div class="tabsep"></div>
+        <div class="tab" data-tab="DAY">Time &amp; daylight</div>
+        <div class="tab" data-tab="FLOW">Data flow</div>
+        <div class="tab" data-tab="RES">Resolution</div>
+        <div class="tab" data-tab="FIRE">Fires</div>
+        <div class="tab" data-tab="COV">Coverage</div>
+        <div class="tab" data-tab="JOBS">Jobs</div>
+        <div class="tab" data-tab="LIB">Save &amp; share</div>
+      </div>
+      <div id="tabbody"></div>
+    </aside>
+  </div>
+</div>
+<div class="tip" id="tip"></div>
+<div id="overlay"><div class="card" id="overlaycard"></div></div>
+
+<script src="static/vendor/maplibre-gl.js"></script>
+<script src="static/js/util.js"></script>
+<script src="static/js/charts.js"></script>
+<script src="static/js/diagrams.js"></script>
+<script src="static/js/map.js"></script>
+<script src="static/js/panels.js"></script>
+<script src="static/js/share.js"></script>
+<script src="static/js/fires.js"></script>
+<script src="static/js/main.js"></script>
+</body>
+</html>

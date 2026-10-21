@@ -1,0 +1,56 @@
+# Builds the one-file WUP_Explorer executable for Windows (plus macOS/Linux) and smoke-tests it.
+# Run it from the Actions tab ("Run workflow"), or push a tag like explorer-v0.3 to attach the
+# executables to a GitHub release. Download the artifact "WUP_Explorer-Windows" -> WUP_Explorer.exe.
+name: Build WUP Explorer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["explorer-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-explorer.txt pyinstaller
+          pip install --no-deps -e .
+      - name: Unit tests (explorer)
+        run: |
+          pip install pytest
+          python -m pytest tests/test_explorer.py -q
+      - name: Build
+        run: pyinstaller --noconfirm --clean packaging/wup_explorer.spec
+      - name: Smoke test the executable
+        shell: bash
+        run: |
+          ./dist/WUP_Explorer --source synthetic --no-browser --port 8799 --workspace smoke_ws &
+          for i in $(seq 1 90); do curl -sf http://127.0.0.1:8799/api/status > /dev/null && break; sleep 2; done
+          curl -sf http://127.0.0.1:8799/ > /dev/null
+          curl -sf -X POST -H 'Content-Type: application/json' \
+               -d '{"point_ids":[18685],"start":"2009-05-13T00","hours":24,"spinup_hours":24,"mode":"live"}' \
+               http://127.0.0.1:8799/api/series > /dev/null
+          curl -sf -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8799/api/fires/pinery-2009/check > /dev/null
+          curl -s -X POST http://127.0.0.1:8799/api/shutdown || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WUP_Explorer-${{ runner.os }}
+          path: dist/WUP_Explorer*
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/WUP_Explorer*

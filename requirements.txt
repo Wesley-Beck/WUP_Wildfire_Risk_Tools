@@ -27,6 +27,12 @@ Pillow>=10.0
 tqdm>=4.65
 click>=8.1
 
+# Grid explorer (python -m aorc_tools.explorer) — see requirements-explorer.txt
+flask>=3.0
+netCDF4>=1.6
+tzdata>=2023.3
+openpyxl>=3.1
+
 # Solar geometry (for hourly FWI sunrise/sunset)
 astral>=3.2
 
