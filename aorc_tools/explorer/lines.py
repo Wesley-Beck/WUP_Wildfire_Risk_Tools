@@ -68,31 +68,69 @@ MIN_TREND_YEARS = 10
 FDR_Q = 0.10
 SAMPLE_KM = 0.1                      # lines are sampled every 100 m to find the cells they cross
 SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
+ISLE_ROYALE_LAT = 47.6                # cells north of this are Isle Royale (no lines; lake climate): not in the comparator
+NULL_SHIFTS = 199                     # random shifted corridors for the null test
 
-# yearly metrics (per cell, per index); "doy" metrics are days since Jan 1 (0 = Jan 1)
+# Yearly metrics (per cell, per index): a maximum and a minimum at every timescale -- hour of day, day, month, season,
+# year (and, from the years, the whole record). "doy" metrics are days since Jan 1 (0 = Jan 1).
+MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 METRICS = {
-    "annual_max": "annual maximum of the daily maxima",
-    "annual_max_doy": "date of the annual maximum (day of year)",
+    # year (calendar year; needs 90% of its days)
+    "year_max": "highest daily maximum of the year (global maximum)",
+    "year_max_doy": "date of the year's highest daily maximum (day of year)",
+    "year_min": "lowest daily minimum of the year (global minimum)",
+    "year_min_doy": "date of the year's lowest daily minimum (day of year)",
+    # season (March-November; needs 90% of its days)
+    "season_max": "highest daily maximum, March-November",
+    "season_max_doy": "date of the season's highest daily maximum (day of year)",
+    "season_min": "lowest daily minimum, March-November",
+    "season_min_doy": "date of the season's lowest daily minimum (day of year)",
     "season_mean": "mean daily maximum, March-November",
-    "days_p90": "days above the regional 90th percentile",
+    "min_season_mean": "mean daily minimum, March-November (overnight recovery: higher = poorer recovery)",
+    "diurnal_range_mean": "mean daily range (maximum - minimum), March-November",
+    # seasonal local extremes of the 15-day smoothed daily maximum (and of the smoothed daily minimum)
+    "spring_peak": "spring (Mar-Jun) local maximum of the smoothed daily maximum",
+    "spring_peak_doy": "date of the spring peak (day of year)",
+    "summer_trough": "summer (Jun-Aug) local minimum of the smoothed daily maximum",
+    "summer_trough_doy": "date of the summer trough (day of year)",
+    "fall_peak": "fall (Aug-Nov) local maximum of the smoothed daily maximum",
+    "fall_peak_doy": "date of the fall peak (day of year)",
+    "smoothed_max": "season (Mar-Nov) maximum of the smoothed daily maximum",
+    "smoothed_min": "season (Mar-Nov) minimum of the smoothed daily maximum",
+    "spring_peak_of_min": "spring (Mar-Jun) local maximum of the smoothed daily minimum",
+    "summer_trough_of_min": "summer (Jun-Aug) local minimum of the smoothed daily minimum",
+    "fall_peak_of_min": "fall (Aug-Nov) local maximum of the smoothed daily minimum",
+    # how often it is high (regional thresholds)
+    "days_p90": "days above the regional 90th percentile of daily maxima",
     "days_p95": "days above the regional 95th percentile",
     "days_p99": "days above the regional 99th percentile",
+    "days_min_p90": "days whose daily minimum is above the regional 90th percentile of daily minima (nights that do not recover)",
+    # when (the high-danger season)
     "first_p90_doy": "first day above the 90th percentile (day of year)",
     "last_p90_doy": "last day above the 90th percentile (day of year)",
-    "span_p90": "days from the first to the last day above the 90th percentile",
-    "spring_peak": "spring (Mar-Jun) local maximum of the 15-day smoothed series",
-    "spring_peak_doy": "date of the spring peak (day of year)",
-    "summer_trough": "summer (Jun-Aug) local minimum of the smoothed series",
-    "summer_trough_doy": "date of the summer trough (day of year)",
-    "fall_peak": "fall (Aug-Nov) local maximum of the smoothed series",
-    "fall_peak_doy": "date of the fall peak (day of year)",
-    "season_min": "season (Mar-Nov) minimum of the smoothed series",
+    "span_p90": "days from the first to the last day above the 90th percentile (0 = none)",
+    "any_p90": "1 if the year had any day above the 90th percentile, else 0 (corridor mean = share of the corridor)",
+    "core_first_p90_doy": "10th percentile of the dates above the 90th percentile (robust season start; >= 3 such days)",
+    "core_last_p90_doy": "90th percentile of the dates above the 90th percentile (robust season end; >= 3 such days)",
+    "core_span_p90": "days between the robust start and end of the high-danger season (>= 3 such days)",
+    # hour of day
     "peak_hour_lst": "median local standard hour of the daily maximum on days above the 90th percentile",
-    "min_season_mean": "mean daily MINIMUM, March-November (overnight recovery; higher = poorer recovery)",
-    "days_min_p90": "days whose daily minimum is above the regional 90th percentile of daily minima (nights that do not recover)",
+    "trough_hour_lst": "median local standard hour of the daily minimum, March-November",
 }
-TREND_METRICS = ["days_p90", "days_p95", "annual_max", "season_mean", "spring_peak", "fall_peak", "first_p90_doy",
-                 "last_p90_doy", "span_p90", "min_season_mean", "days_min_p90"]
+for _i, _m in enumerate(MONTH_NAMES, start=1):                  # month (needs 90% of the month's days)
+    METRICS[f"m{_i:02d}_max"] = f"highest daily maximum in {_m}"
+    METRICS[f"m{_i:02d}_min"] = f"lowest daily minimum in {_m}"
+TREND_METRICS = list(METRICS)                                   # every metric gets a corridor / region trend
+# per-cell trend maps (all ~28,000 cells; the costly part, so a focused set)
+CELL_TRENDS = ["days_p90", "days_p95", "days_min_p90", "year_max", "year_min", "season_max", "season_min", "season_mean",
+               "min_season_mean", "diurnal_range_mean", "spring_peak", "summer_trough", "fall_peak", "first_p90_doy",
+               "last_p90_doy", "span_p90"]
+# per-line columns
+LINE_METRICS = ["days_p90", "days_p95", "days_p99", "days_min_p90", "year_max", "year_min", "season_max", "season_min",
+                "season_mean", "min_season_mean", "diurnal_range_mean", "spring_peak", "summer_trough", "fall_peak",
+                "first_p90_doy", "last_p90_doy", "span_p90", "peak_hour_lst", "trough_hour_lst"]
+LINE_TRENDS = ["days_p90", "days_p95", "days_min_p90", "year_max", "year_min", "season_max", "spring_peak", "fall_peak",
+               "first_p90_doy", "span_p90"]
 
 
 # =============================================================================================== line layers
@@ -440,7 +478,8 @@ def cross_attributes(layers: LineLayers, target_id: str, other_id: str, max_m: f
     tree = STRtree([km_geom(f["geometry"]) for f in ofeat])
     out, n_filled_owner, n_filled_kv, n_disagree = [], 0, 0, 0
     for f in tgt["features"]:
-        p = dict(f["properties"])
+        fp = f["properties"]
+        p = {**(fp.get("attrs") or {}), **{k: v for k, v in fp.items() if k != "attrs"}}   # keep raw keys (TYPE, location)
         lon, lat, w = sample_line(f["geometry"])
         if len(lon):
             pts = points(np.c_[lon * kx, lat * ky])
@@ -455,8 +494,10 @@ def cross_attributes(layers: LineLayers, target_id: str, other_id: str, max_m: f
                     votes_v[op["voltage_kv"]] = votes_v.get(op["voltage_kv"], 0.0) + w[i]
             alt_o = max(votes_o, key=votes_o.get) if votes_o else None
             alt_v = max(votes_v, key=votes_v.get) if votes_v else None
+            share_o = float(votes_o.get(alt_o, 0.0) / w.sum()) if alt_o else 0.0   # length backing that owner
+            share_v = float(votes_v.get(alt_v, 0.0) / w.sum()) if alt_v else 0.0
         else:
-            share, alt_o, alt_v = 0.0, None, None
+            share, alt_o, alt_v, share_o, share_v = 0.0, None, None, 0.0, 0.0
         p.update(alt_layer=other_id, alt_match_share=round(share, 3))
         if alt_o:
             p["alt_owner"] = alt_o
@@ -464,15 +505,15 @@ def cross_attributes(layers: LineLayers, target_id: str, other_id: str, max_m: f
             p["alt_voltage_kv"] = alt_v
         if p.get("owner"):
             p["owner_best"] = p["owner"]
-        elif alt_o and share >= 0.5:
+        elif alt_o and share_o >= 0.5:
             p["owner_best"] = alt_o
             n_filled_owner += 1
         if p.get("voltage_kv"):
             p["voltage_best_kv"] = p["voltage_kv"]
-            if alt_v and share >= 0.5 and abs(float(alt_v) - float(p["voltage_kv"])) > 1:
+            if alt_v and share_v >= 0.5 and abs(float(alt_v) - float(p["voltage_kv"])) > 1:
                 p["alt_voltage_disagrees"] = True
                 n_disagree += 1
-        elif alt_v and share >= 0.5:
+        elif alt_v and share_v >= 0.5:
             p["voltage_best_kv"] = alt_v
             n_filled_kv += 1
         out.append({"type": "Feature", "geometry": f["geometry"], "properties": p})
@@ -484,15 +525,30 @@ def cross_attributes(layers: LineLayers, target_id: str, other_id: str, max_m: f
             "cross_check": {"target": target_id, "other": other_id, "max_m": max_m, "owner_filled": n_filled_owner,
                             "voltage_filled": n_filled_kv, "voltage_disagrees": n_disagree,
                             "rule": "owner/voltage taken from the other layer only where the line has none and >= 50% of "
-                                    "its length lies within max_m of the other layer's lines"}}
+                                    "its length lies within max_m of other-layer lines carrying that value"}}
     return layers.save(lid, out, meta, source_tag="x")
 
 
 # =============================================================================================== statistics
 
+def _tie_term(Y):
+    """Per column: sum over groups of tied values of t(t-1)(2t+5) (Mann-Kendall variance correction), vectorised."""
+    ny, nc = Y.shape
+    Ys = np.sort(np.where(np.isfinite(Y), Y, np.inf), axis=0)
+    starts = np.ones((ny + 1, nc), dtype=bool)                           # a group starts where the value changes
+    starts[1:ny] = ~((Ys[1:] == Ys[:-1]) & np.isfinite(Ys[1:]))
+    pos = np.flatnonzero(starts.T.ravel())
+    t = np.diff(pos)                                                       # group sizes (column-major, n+1 per column)
+    col = pos[:-1] // (ny + 1)
+    term = t * (t - 1.0) * (2 * t + 5.0)
+    return np.bincount(col, weights=term, minlength=nc)[:nc]
+
+
 def theil_sen(years: np.ndarray, Y: np.ndarray, block=4000):
-    """Per-column Theil-Sen slope (per year), Mann-Kendall S, n, two-sided p (normal approximation, no tie or
-    autocorrelation correction). ``Y`` is (n_years, n_cols) with NaN for missing years."""
+    """Per-column Theil-Sen slope (per year), Mann-Kendall S, n and two-sided p (normal approximation with the tie and
+    continuity corrections; no autocorrelation correction -- see ``mk_hamed_rao`` for single series). ``Y`` is
+    (n_years, n_cols) with NaN for missing years. Use S (or tau = S / pairs) for the direction: for sparse counts the
+    Sen slope is often exactly 0 even when the trend is significant."""
     years = np.asarray(years, dtype=float)
     ny, nc = Y.shape
     ii, jj = np.triu_indices(ny, k=1)
@@ -506,13 +562,44 @@ def theil_sen(years: np.ndarray, Y: np.ndarray, block=4000):
         with np.errstate(invalid="ignore"), _quiet():
             slope[c0:c0 + block] = np.nanmedian(d / dt, axis=0) if np.isfinite(d).any() else np.nan
         S[c0:c0 + block] = np.nansum(np.sign(d), axis=0)
-    var = n * (n - 1) * (2 * n + 5) / 18.0
+    var = (n * (n - 1) * (2 * n + 5) - _tie_term(Y)) / 18.0
     with np.errstate(invalid="ignore", divide="ignore"):
         z = np.where(S > 0, S - 1, np.where(S < 0, S + 1, 0)) / np.sqrt(var)
     p = np.array([math.erfc(abs(x) / math.sqrt(2)) if np.isfinite(x) else np.nan for x in z])
+    p = np.where((var <= 0) & (n >= 2), 1.0, p)                           # every value tied: no trend
     bad = n < MIN_TREND_YEARS
     slope[bad], p[bad] = np.nan, np.nan
     return slope, S, n, p
+
+
+def mk_hamed_rao(years, y) -> float | None:
+    """Mann-Kendall p for one series with the Hamed & Rao (1998) correction for serial correlation: the variance is
+    inflated by n/n*_s from the significant autocorrelations of the ranks of the Sen-detrended series."""
+    yrs = np.asarray(years, dtype=float)
+    y = np.asarray(y, dtype=float)
+    ok = np.isfinite(y)
+    yrs, y = yrs[ok], y[ok]
+    n = len(y)
+    if n < MIN_TREND_YEARS:
+        return None
+    sl, S, _, _ = theil_sen(yrs, y[:, None])
+    S = float(S[0])
+    resid = y - (sl[0] if np.isfinite(sl[0]) else 0.0) * yrs
+    r = pd.Series(resid).rank().values
+    r = r - r.mean()
+    den = float((r * r).sum())
+    ratio = 1.0
+    if den > 0:
+        bound = 1.96 / math.sqrt(n)
+        for i in range(1, n - 1):
+            rho = float((r[:-i] * r[i:]).sum() / den)
+            if abs(rho) > bound:
+                ratio += 2.0 / (n * (n - 1) * (n - 2)) * (n - i) * (n - i - 1) * (n - i - 2) * rho
+    var = (n * (n - 1) * (2 * n + 5) - float(_tie_term(y[:, None])[0])) / 18.0 * max(ratio, 1e-6)
+    if var <= 0:
+        return 1.0
+    z = (S - 1 if S > 0 else S + 1 if S < 0 else 0) / math.sqrt(var)
+    return math.erfc(abs(z) / math.sqrt(2))
 
 
 def fdr_mask(p: np.ndarray, q=FDR_Q) -> np.ndarray:
@@ -539,8 +626,9 @@ def _window(year, a, b):
     return (pd.Timestamp(year, *a) - d0).days, (pd.Timestamp(year, *b) - d0).days + 1
 
 
-def _smooth(X, w=SMOOTH_DAYS, min_frac=0.5):
-    """Centered running mean along axis 0, ignoring NaN (needs ``min_frac`` of the window present)."""
+def _smooth(X, w=SMOOTH_DAYS, min_side=5):
+    """Centred running mean along axis 0, ignoring NaN. A day gets a value only when at least ``min_side`` saved days
+    lie on each side of it (counting itself), so a lopsided window at a data edge or gap cannot fake a peak."""
     fin = np.isfinite(X)
     c = np.cumsum(np.vstack([np.zeros((1, X.shape[1])), np.where(fin, X, 0.0)]), axis=0)
     k = np.cumsum(np.vstack([np.zeros((1, X.shape[1])), fin.astype(np.float64)]), axis=0)
@@ -549,12 +637,15 @@ def _smooth(X, w=SMOOTH_DAYS, min_frac=0.5):
     lo = np.clip(np.arange(n) - h, 0, n)
     hi = np.clip(np.arange(n) + h + 1, 0, n)
     s, cnt = c[hi] - c[lo], k[hi] - k[lo]
+    i = np.arange(n)
+    left, right = k[i + 1] - k[lo], k[hi] - k[i]
     with np.errstate(invalid="ignore", divide="ignore"):
-        return np.where(cnt >= max(1, min_frac * w), s / cnt, np.nan)
+        return np.where((left >= min_side) & (right >= min_side), s / np.maximum(cnt, 1), np.nan)
 
 
-def _arg_ext(Z, lo, hi, fn):
-    """(value, day index) of the max/min of Z[lo:hi] per column; NaN where the window is empty."""
+def _arg_ext(Z, lo, hi, fn, interior=False):
+    """(value, day index) of the max/min of Z[lo:hi] per column; NaN where the window is empty. ``interior``: a local
+    extreme must not sit on the window's first or last day (that is a slope running out of the window, not a peak)."""
     sub = Z[lo:hi]
     fin = np.isfinite(sub)
     anyf = fin.any(axis=0)
@@ -562,53 +653,110 @@ def _arg_ext(Z, lo, hi, fn):
     filled = np.where(fin, sub, fill)
     idx = filled.argmax(axis=0) if fn == "max" else filled.argmin(axis=0)
     val = filled[idx, np.arange(sub.shape[1])]
+    if interior:
+        anyf = anyf & (idx > 0) & (idx < sub.shape[0] - 1)
     return np.where(anyf, val, np.nan), np.where(anyf, idx + lo, np.nan)
 
 
-def year_metrics(X, H, year, thr: dict, Xmin=None, thr_min=None) -> tuple[dict, np.ndarray]:
-    """Yearly metrics for every column of X (daily maxima, (n_days, n_cells), NaN = not saved). H = local hour of the
-    maximum (int8, -1 = n/a) or None. Returns (metrics, valid) where valid marks cells with >= 90% of Mar-Nov saved."""
+def _frac_ok(X, lo, hi):
+    return np.isfinite(X[lo:hi]).mean(axis=0) >= MIN_SEASON_FRACTION if hi > lo else np.zeros(X.shape[1], bool)
+
+
+def year_metrics(X, H, year, thr: dict, Xmin=None, thr_min=None, Hmin=None) -> tuple[dict, np.ndarray]:
+    """Yearly metrics for every column (cell). X = daily maxima (n_days, n_cells), NaN = not saved; Xmin = daily minima
+    (None for a once-a-day index: then X is used for both); H / Hmin = local hour of the maximum / minimum (int8, -1 =
+    n/a) or None. Returns (metrics, valid): ``valid`` marks cells with >= 90% of their March-November days saved.
+    Season metrics need ``valid``, year metrics 90% of the year, month metrics 90% of the month."""
+    once_a_day = Xmin is None
+    Xn = X if once_a_day else Xmin
+    nd, nc = X.shape
     s0, s1 = _window(year, *SEASON)
-    Xs = X[s0:s1]
-    valid = np.isfinite(Xs).mean(axis=0) >= MIN_SEASON_FRACTION
+    Xs, Ns = X[s0:s1], Xn[s0:s1]
+    valid = _frac_ok(X, s0, s1)
+    yvalid = _frac_ok(X, 0, nd)
     m = {}
-    m["annual_max"], d = _arg_ext(X, s0, s1, "max")
-    m["annual_max_doy"] = d
     with np.errstate(invalid="ignore"), _quiet():
-        m["season_mean"] = np.nanmean(Xs, axis=0) if Xs.size else np.nan
-    for p in PCTS:
-        with np.errstate(invalid="ignore"):
-            m[f"days_p{p}"] = (Xs >= thr[p]).sum(axis=0).astype(float)
-    with np.errstate(invalid="ignore"):
-        high = Xs >= thr[90]
+        # year and season extremes
+        m["year_max"], m["year_max_doy"] = _arg_ext(X, 0, nd, "max")
+        m["year_min"], m["year_min_doy"] = _arg_ext(Xn, 0, nd, "min")
+        m["season_max"], m["season_max_doy"] = _arg_ext(X, s0, s1, "max")
+        m["season_min"], m["season_min_doy"] = _arg_ext(Xn, s0, s1, "min")
+        m["season_mean"] = np.nanmean(Xs, axis=0)
+        m["min_season_mean"] = np.nanmean(Ns, axis=0) if not once_a_day else np.full(nc, np.nan)
+        m["diurnal_range_mean"] = np.nanmean(Xs - Ns, axis=0) if not once_a_day else np.full(nc, np.nan)
+        # thresholds (compared in float32, the precision of the unpacked values, so a value equal to the threshold
+        # counts the same way everywhere); counts are scaled to the whole season when up to 10% of days are missing
+        n_season = Xs.shape[0]
+        n_fin = np.maximum(np.isfinite(Xs).sum(axis=0), 1)
+        for p in PCTS:
+            t = np.float32(thr[p])
+            m[f"days_p{p}"] = np.where(np.isfinite(Xs), Xs >= t, False).sum(axis=0) * (n_season / n_fin)
+        if not once_a_day and thr_min is not None:
+            n_fin_n = np.maximum(np.isfinite(Ns).sum(axis=0), 1)
+            m["days_min_p90"] = np.where(np.isfinite(Ns), Ns >= np.float32(thr_min), False).sum(axis=0) * (n_season / n_fin_n)
+        else:
+            m["days_min_p90"] = np.full(nc, np.nan)
+        high = np.where(np.isfinite(Xs), Xs >= np.float32(thr[90]), False)
     anyh = high.any(axis=0)
     first = high.argmax(axis=0)
     last = Xs.shape[0] - 1 - high[::-1].argmax(axis=0)
     m["first_p90_doy"] = np.where(anyh, first + s0, np.nan)
     m["last_p90_doy"] = np.where(anyh, last + s0, np.nan)
     m["span_p90"] = np.where(anyh, last - first + 1, 0.0)
+    m["any_p90"] = anyh.astype(float)
+    nhigh = high.sum(axis=0)
+    cs = np.cumsum(high, axis=0)
+    q10 = np.maximum(1, np.ceil(0.1 * nhigh))
+    q90 = np.maximum(1, np.ceil(0.9 * nhigh))
+    c_first = (cs >= q10[None, :]).argmax(axis=0)
+    c_last = (cs >= q90[None, :]).argmax(axis=0)
+    core = nhigh >= 3
+    m["core_first_p90_doy"] = np.where(core, c_first + s0, np.nan)
+    m["core_last_p90_doy"] = np.where(core, c_last + s0, np.nan)
+    m["core_span_p90"] = np.where(core, c_last - c_first + 1, np.nan)
+    # seasonal local extremes of the smoothed series (interior of their windows only)
     Z = _smooth(X)
-    m["spring_peak"], m["spring_peak_doy"] = _arg_ext(Z, *_window(year, *SPRING), "max")
-    m["summer_trough"], m["summer_trough_doy"] = _arg_ext(Z, *_window(year, *SUMMER), "min")
-    m["fall_peak"], m["fall_peak_doy"] = _arg_ext(Z, *_window(year, *FALL), "max")
-    m["season_min"], _ = _arg_ext(Z, s0, s1, "min")
-    if H is not None:
-        Hs = H[s0:s1].astype(float)
-        Hs[(Hs < 0) | ~high] = np.nan
-        with np.errstate(invalid="ignore"), _quiet():
+    m["spring_peak"], m["spring_peak_doy"] = _arg_ext(Z, *_window(year, *SPRING), "max", interior=True)
+    m["summer_trough"], m["summer_trough_doy"] = _arg_ext(Z, *_window(year, *SUMMER), "min", interior=True)
+    m["fall_peak"], m["fall_peak_doy"] = _arg_ext(Z, *_window(year, *FALL), "max", interior=True)
+    m["smoothed_max"], _ = _arg_ext(Z, s0, s1, "max")
+    m["smoothed_min"], _ = _arg_ext(Z, s0, s1, "min")
+    if not once_a_day:
+        Zn = _smooth(Xn)
+        m["spring_peak_of_min"], _ = _arg_ext(Zn, *_window(year, *SPRING), "max", interior=True)
+        m["summer_trough_of_min"], _ = _arg_ext(Zn, *_window(year, *SUMMER), "min", interior=True)
+        m["fall_peak_of_min"], _ = _arg_ext(Zn, *_window(year, *FALL), "max", interior=True)
+    else:
+        for k in ("spring_peak_of_min", "summer_trough_of_min", "fall_peak_of_min"):
+            m[k] = np.full(nc, np.nan)
+    # hour of day
+    with np.errstate(invalid="ignore"), _quiet():
+        if H is not None and not once_a_day:
+            Hs = H[s0:s1].astype(float)
+            Hs[(Hs < 0) | ~high] = np.nan
             m["peak_hour_lst"] = np.nanmedian(Hs, axis=0)
-    else:
-        m["peak_hour_lst"] = np.full(X.shape[1], np.nan)
-    if Xmin is not None and thr_min is not None:
-        Ms = Xmin[s0:s1]
-        with np.errstate(invalid="ignore"), _quiet():
-            m["min_season_mean"] = np.nanmean(Ms, axis=0)
-            m["days_min_p90"] = (Ms >= thr_min).sum(axis=0).astype(float)
-    else:
-        m["min_season_mean"] = np.full(X.shape[1], np.nan)
-        m["days_min_p90"] = np.full(X.shape[1], np.nan)
+        else:
+            m["peak_hour_lst"] = np.full(nc, np.nan)
+        if Hmin is not None and not once_a_day:
+            Hn = Hmin[s0:s1].astype(float)
+            Hn[Hn < 0] = np.nan
+            m["trough_hour_lst"] = np.nanmedian(Hn, axis=0)
+        else:
+            m["trough_hour_lst"] = np.full(nc, np.nan)
     for k in m:
-        m[k] = np.where(valid, m[k], np.nan).astype(np.float32)
+        m[k] = np.where(yvalid if k.startswith("year_") else valid, m[k], np.nan).astype(np.float32)
+    # months
+    for mo in range(1, 13):
+        lo, hi = _window(year, (mo, 1), (mo, pd.Timestamp(year, mo, 1).days_in_month))
+        ok = _frac_ok(X, lo, hi)
+        mx, _ = _arg_ext(X, lo, hi, "max")
+        mn, _ = _arg_ext(Xn, lo, hi, "min")
+        m[f"m{mo:02d}_max"] = np.where(ok, mx, np.nan).astype(np.float32)
+        m[f"m{mo:02d}_min"] = np.where(ok, mn, np.nan).astype(np.float32)
+    if nd == 366:                                     # dates on a 365-day calendar: Feb 29 -> Feb 28, later days -1
+        for k in m:
+            if k.endswith("_doy"):
+                m[k] = np.where(m[k] >= 59, m[k] - 1, m[k]).astype(np.float32)
     return m, valid
 
 
@@ -679,7 +827,7 @@ class LineAnalysis:
         name = "FWI_daily_noon" if v == "FWI_daily" else f"{v}_daily_max"
         with HDF_LOCK, netCDF4.Dataset(path) as ds:
             if name not in ds.variables:
-                return None, None
+                return None, None, None, None
             var = ds[name]
             var.set_auto_maskandscale(False)
             raw = np.asarray(var[:])[:, self.store.y, self.store.x]
@@ -689,11 +837,16 @@ class LineAnalysis:
                 hv = ds[hname]
                 hv.set_auto_maskandscale(False)
                 H = np.asarray(hv[:])[:, self.store.y, self.store.x]
+            Hn = None
             if f"{v}_daily_min" in ds.variables:
                 mv = ds[f"{v}_daily_min"]
                 mv.set_auto_maskandscale(False)
                 mn = np.asarray(mv[:])[:, self.store.y, self.store.x]
-        return raw, H, mn
+            if f"{v}_hour_of_min" in ds.variables:
+                hv = ds[f"{v}_hour_of_min"]
+                hv.set_auto_maskandscale(False)
+                Hn = np.asarray(hv[:])[:, self.store.y, self.store.x]
+        return raw, H, mn, Hn
 
     def run(self, layer_id, source, cfg_id, indices=None, years=None, ref_years=None, progress=None) -> dict:
         from aorc_tools.explorer.store import FILL_I2, PACK
@@ -706,6 +859,8 @@ class LineAnalysis:
         if not years:
             raise ValueError("nothing saved for this source and configuration yet: compute the record first")
         ref_years = [y for y in (ref_years or years) if y in years]
+        if not ref_years:
+            raise ValueError("none of the reference years is saved")
         steps = len(years) + len(indices) * (len(ref_years) + len(years)) + 2
         done = 0
         # 1. daily files (incremental)
@@ -723,6 +878,10 @@ class LineAnalysis:
         corr = np.where(w_corr > 0)[0]
         if not len(corr):
             raise ValueError("none of the lines crosses a study cell")
+        lat = self.grid.points.latitude.values
+        mainland = lat < ISLE_ROYALE_LAT                       # Isle Royale: no lines, lake climate
+        rest = np.where(mainland & (w_corr == 0))[0]           # the comparator: mainland cells the lines do not cross
+        mainland_idx = np.where(mainland)[0]
         aid = self.analysis_id(layer_id, source, cfg_id)
         out_dir = self.root / aid
         tmp_dir = self.root / (aid + ".tmp")
@@ -733,13 +892,20 @@ class LineAnalysis:
             "id": aid, "layer": lmeta, "source": source, "config_id": cfg_id, "created": now_iso(),
             "years": years, "reference_years": [min(ref_years), max(ref_years)], "indices": {},
             "definitions": {"season": "March 1 - November 30 (local standard days)", "metrics": METRICS,
-                            "thresholds": "percentiles of all study cells' daily maxima, Mar-Nov, pooled over the reference years",
+                            "thresholds": "percentiles of all mainland cells' daily maxima, Mar-Nov, pooled over the reference years",
+                            "corridor": "km-weighted mean over the cells the lines cross",
+                            "region": "mean over the rest of the mainland WUP: cells the lines do not cross (Isle Royale excluded)",
+                            "null_test": "the same lines shifted to random positions (5-40 km, any direction): how often a "
+                                         "random corridor of the same shape is as dangerous as the real one",
+                            "days": "a local standard day needs >= 20 saved hours; counts are scaled to the whole season "
+                                    "when up to 10% of its days are missing",
                             "smoothing_days": SMOOTH_DAYS, "valid_year": f">= {int(MIN_SEASON_FRACTION * 100)}% of Mar-Nov days saved",
                             "trend": f"Theil-Sen slope per decade; Mann-Kendall p (two-sided); >= {MIN_TREND_YEARS} valid years; "
                                      f"cell maps: Benjamini-Hochberg FDR q = {FDR_Q}"},
             "corridor": {"cells": int(len(corr)), "km_in_cells": round(float(w_corr.sum()), 1),
                          "km_outside_cells": round(sum(c["km_outside"] for c in cells.values()), 1),
-                         "share_of_region_cells": round(len(corr) / n_cells, 4)},
+                         "share_of_region_cells": round(len(corr) / max(1, len(mainland_idx)), 4),
+                         "region_cells": int(len(rest))},
             "caveats": [
                 "Fire-weather danger along the lines, not ignition probability or consequence.",
                 "Thresholds are regional (one scale for every place); a line in a drier part of the WUP crosses them more often.",
@@ -759,22 +925,25 @@ class LineAnalysis:
             # 3. regional thresholds (exact, from a histogram of the packed values)
             counts = np.zeros(65536, dtype=np.int64)
             counts_min = np.zeros(65536, dtype=np.int64)
+            ref_used = []
             for y in ref_years:
                 progress(done, steps, f"{v}: thresholds {y}")
                 done += 1
                 if paths.get(y) is None:
                     continue
-                raw, _, mn = self._read_daily(paths[y], v)
+                raw, _, mn, _ = self._read_daily(paths[y], v)
                 if raw is None:
                     continue
                 s0, s1 = _window(y, *SEASON)
-                for arr, cnt in ((raw, counts), (mn, counts_min)):
+                for j, (arr, cnt) in enumerate(((raw, counts), (mn, counts_min))):
                     if arr is None:
                         continue
-                    a = arr[s0:s1].ravel()
+                    a = arr[s0:s1][:, mainland_idx].ravel()
                     a = a[a != FILL_I2].astype(np.int64) + 32768
                     if a.size:
                         cnt += np.bincount(a, minlength=65536)
+                        if j == 0:
+                            ref_used.append(y)
             thr = _hist_percentiles(counts, scale, PCTS)
             thr_min = _hist_percentiles(counts_min, scale, (90,))[90]
             if thr[90] is None:
@@ -783,49 +952,58 @@ class LineAnalysis:
                 continue
             # 4. yearly metrics per cell
             M = {k: np.full((len(years), n_cells), np.nan, dtype=np.float32) for k in METRICS}
-            cyc_c = np.zeros(365); cyc_r = np.zeros(365); cyc_n = np.zeros(365)
+            cyc = {k: np.zeros(365) for k in ("c", "r", "cn", "rn", "n")}
             n_valid = np.zeros(len(years), dtype=int)
             for yi, y in enumerate(years):
                 progress(done, steps, f"{v}: metrics {y}")
                 done += 1
                 if paths.get(y) is None:
                     continue
-                raw, H, mn = self._read_daily(paths[y], v)
+                raw, H, mn, Hn = self._read_daily(paths[y], v)
                 if raw is None:
                     continue
                 X = np.where(raw == FILL_I2, np.nan, raw.astype(np.float32) * np.float32(scale))
                 Xmin = None if mn is None else np.where(mn == FILL_I2, np.nan, mn.astype(np.float32) * np.float32(scale))
                 del raw, mn
-                m, valid = year_metrics(X, H, y, thr, Xmin, thr_min)
-                del Xmin
+                m, valid = year_metrics(X, H, y, thr, Xmin, thr_min, Hn)
                 n_valid[yi] = int(valid.sum())
                 for k in METRICS:
                     M[k][yi] = m[k]
-                if valid[corr].any() and valid.any():
+                if valid[corr].any():                                     # mean seasonal cycle, max and min
                     d365 = _doy_365(y, X.shape[0])
                     keep = d365 >= 0
                     wc = w_corr[corr] * valid[corr]
-                    with np.errstate(invalid="ignore"), _quiet():
-                        xc = np.nansum(X[:, corr] * wc, axis=1) / np.maximum(1e-9, np.sum(np.isfinite(X[:, corr]) * wc, axis=1))
-                        xr = np.nanmean(np.where(valid, X, np.nan), axis=1)
-                    ok = keep & np.isfinite(xc) & np.isfinite(xr)
-                    cyc_c[d365[ok]] += xc[ok]; cyc_r[d365[ok]] += xr[ok]; cyc_n[d365[ok]] += 1
-                del X, H
+                    Xn = X if Xmin is None else Xmin
+                    with np.errstate(invalid="ignore", divide="ignore"), _quiet():
+                        series = []
+                        for A in (X, Xn):
+                            ac = A[:, corr]
+                            fin = np.isfinite(ac)
+                            wsum = (fin * wc).sum(axis=1)
+                            series.append(np.where(wsum > 0, np.where(fin, ac, 0).dot(wc) / np.maximum(wsum, 1e-12), np.nan))
+                            series.append(np.nanmean(np.where(valid[rest], A[:, rest], np.nan), axis=1))
+                    xc, xr, nc_, nr_ = series
+                    ok = keep & np.isfinite(xc) & np.isfinite(xr) & np.isfinite(nc_) & np.isfinite(nr_)
+                    for key, val in (("c", xc), ("r", xr), ("cn", nc_), ("rn", nr_)):
+                        np.add.at(cyc[key], d365[ok], val[ok])
+                    np.add.at(cyc["n"], d365[ok], 1)
+                del X, H, Xmin, Hn
             vy = [y for y, n in zip(years, n_valid) if n > 0]
             if not vy:
                 summary["indices"][v] = {"skipped": "no year has 90% of March-November saved", "thresholds": thr}
                 continue
             yarr = np.array(years, dtype=float)
-            # corridor / region / per-line yearly series
+            # corridor (km-weighted over the line cells) and region (all cells) series, per metric
             agg = {}
             for k in METRICS:
                 A = M[k]
                 fin = np.isfinite(A)
-                with np.errstate(invalid="ignore"), _quiet():
-                    region = np.nanmean(A, axis=1)
+                with np.errstate(invalid="ignore", divide="ignore"), _quiet():
+                    region = np.nanmean(A[:, rest], axis=1)
                     wc = np.where(fin[:, corr], w_corr[corr], 0.0)
-                    corridor = np.where(wc.sum(axis=1) > 0, np.nansum(np.where(fin[:, corr], A[:, corr], 0) * wc, axis=1)
-                                        / np.maximum(1e-9, wc.sum(axis=1)), np.nan)
+                    corridor = np.where(wc.sum(axis=1) > 0,
+                                        (np.where(fin[:, corr], A[:, corr], 0) * wc).sum(axis=1) / np.maximum(1e-12, wc.sum(axis=1)),
+                                        np.nan)
                 agg[k] = (corridor, region)
                 for yi, y in enumerate(years):
                     if np.isfinite(corridor[yi]) or np.isfinite(region[yi]):
@@ -837,29 +1015,32 @@ class LineAnalysis:
                 c_, r_ = agg[k]
                 Y = np.vstack([c_, r_, c_ - r_]).T
                 sl, S, n, p = theil_sen(yarr, Y)
-                trends[k] = {name: {"per_decade": None if not np.isfinite(sl[j]) else round(float(sl[j] * 10), 4),
-                                    "p": None if not np.isfinite(p[j]) else round(float(p[j]), 4), "n_years": int(n[j])}
-                             for j, name in enumerate(("corridor", "region", "corridor_minus_region"))}
-            # mean seasonal cycle
+                trends[k] = {}
+                for j, name in enumerate(("corridor", "region", "corridor_minus_region")):
+                    phr = mk_hamed_rao(yarr, Y[:, j])
+                    trends[k][name] = {"per_decade": None if not np.isfinite(sl[j]) else round(float(sl[j] * 10), 4),
+                                       "tau": None if n[j] < 2 else round(float(S[j] / (n[j] * (n[j] - 1) / 2)), 4),
+                                       "p": None if not np.isfinite(p[j]) else round(float(p[j]), 4),
+                                       "p_hr": None if phr is None else round(phr, 4), "n_years": int(n[j])}
+            # mean seasonal cycle (smoothed), max and min
             with np.errstate(invalid="ignore", divide="ignore"):
-                cc = _smooth((cyc_c / cyc_n)[:, None])[:, 0]
-                cr = _smooth((cyc_r / cyc_n)[:, None])[:, 0]
+                cyc_s = {key: _smooth((cyc[key] / cyc["n"])[:, None])[:, 0] for key in ("c", "r", "cn", "rn")}
             for d in range(365):
-                if cyc_n[d]:
-                    cycle_rows.append({"index": v, "doy": d, "date": _fmt_doy(d), "corridor": round(float(cc[d]), 3),
-                                       "region": round(float(cr[d]), 3), "years": int(cyc_n[d])})
+                if cyc["n"][d] and (np.isfinite(cyc_s["c"][d]) or np.isfinite(cyc_s["r"][d])):
+                    cycle_rows.append({"index": v, "doy": d, "date": _fmt_doy(d), "corridor": _r3(cyc_s["c"][d]),
+                                       "region": _r3(cyc_s["r"][d]), "corridor_min": _r3(cyc_s["cn"][d]),
+                                       "region_min": _r3(cyc_s["rn"][d]), "years": int(cyc["n"][d])})
 
             def cyc_points(z):
                 pts = {}
-                for name, (a, b), fn in (("spring_peak", SPRING, "max"), ("summer_trough", SUMMER, "min"), ("fall_peak", FALL, "max")):
-                    lo, hi = _window(2001, a, b)
+                for name, (a_, b_), fn in (("spring_peak", SPRING, "max"), ("summer_trough", SUMMER, "min"), ("fall_peak", FALL, "max")):
+                    lo, hi = _window(2001, a_, b_)
                     val, idx = _arg_ext(z[:, None], lo, hi, fn)
-                    pts[name] = {"value": None if not np.isfinite(val[0]) else round(float(val[0]), 2), "date": _fmt_doy(idx[0])}
+                    pts[name] = {"value": _r3(val[0]), "date": _fmt_doy(idx[0])}
                 lo, hi = _window(2001, *SEASON)
-                val, idx = _arg_ext(z[:, None], lo, hi, "max")
-                pts["global_max"] = {"value": None if not np.isfinite(val[0]) else round(float(val[0]), 2), "date": _fmt_doy(idx[0])}
-                val, idx = _arg_ext(z[:, None], lo, hi, "min")
-                pts["season_min"] = {"value": None if not np.isfinite(val[0]) else round(float(val[0]), 2), "date": _fmt_doy(idx[0])}
+                for name, fn in (("global_max", "max"), ("global_min", "min")):
+                    val, idx = _arg_ext(z[:, None], lo, hi, fn)
+                    pts[name] = {"value": _r3(val[0]), "date": _fmt_doy(idx[0])}
                 return pts
 
             def mean_of(arr):
@@ -869,9 +1050,19 @@ class LineAnalysis:
 
             recent = np.array(years) >= max(vy) - 9
             early = np.array(years) <= min(vy) + 9
+            # record extremes (whole period): highest year maximum / lowest year minimum, and when
+            rec = {}
+            for name, k, fn in (("max", "year_max", np.nanargmax), ("min", "year_min", np.nanargmin)):
+                c_, r_ = agg[k]
+                for lab, ser in (("corridor", c_), ("region", r_)):
+                    if np.isfinite(ser).any():
+                        i = int(fn(ser))
+                        rec[f"{lab}_{name}"] = {"value": _r3(ser[i]), "year": int(years[i])}
             summary["indices"][v] = {
                 "label": LABEL[v], "thresholds": {f"p{p}": round(thr[p], 3) for p in PCTS},
+                "threshold_years": [min(ref_used), max(ref_used)] if ref_used else None,
                 "threshold_min_p90": None if thr_min is None else round(thr_min, 3),
+                "once_a_day": v == "FWI_daily",
                 "valid_years": vy, "cells_valid_by_year": dict(zip(map(str, years), map(int, n_valid))),
                 "corridor": {k: mean_of(agg[k][0]) for k in METRICS},
                 "region": {k: mean_of(agg[k][1]) for k in METRICS},
@@ -879,53 +1070,74 @@ class LineAnalysis:
                 "corridor_last_10y": {k: mean_of(agg[k][0][recent]) for k in TREND_METRICS},
                 "region_first_10y": {k: mean_of(agg[k][1][early]) for k in TREND_METRICS},
                 "region_last_10y": {k: mean_of(agg[k][1][recent]) for k in TREND_METRICS},
-                "years_corridor_above_region": {k: int(np.nansum(agg[k][0] > agg[k][1])) for k in ("days_p90", "days_p95", "annual_max")},
-                "cycle": {"corridor": cyc_points(cc), "region": cyc_points(cr)},
+                "years_corridor_above_region": {k: int(np.nansum(agg[k][0] > agg[k][1]))
+                                                for k in ("days_p90", "days_p95", "year_max", "season_max", "days_min_p90")},
+                "record": rec,
+                "cycle": {"corridor": cyc_points(cyc_s["c"]), "region": cyc_points(cyc_s["r"]),
+                          "corridor_min": cyc_points(cyc_s["cn"]), "region_min": cyc_points(cyc_s["rn"])},
                 "trends": trends,
             }
-            # per-cell maps (all study cells): climatology + trends, with FDR significance
+            # per-cell maps (all study cells): climatology, record extremes, trends with FDR significance
             cm = {}
             with np.errstate(invalid="ignore"), _quiet():
-                for k in ("days_p90", "days_p95", "days_p99", "annual_max", "season_mean", "spring_peak", "fall_peak", "span_p90",
-                          "min_season_mean", "days_min_p90"):
-                    cm[f"{k}_mean"] = np.nanmean(M[k], axis=0)
-                for k in ("spring_peak_doy", "fall_peak_doy", "summer_trough_doy", "first_p90_doy", "last_p90_doy", "peak_hour_lst"):
-                    cm[f"{k}_median"] = np.nanmedian(M[k], axis=0)
-            for k in ("days_p90", "days_p95", "annual_max", "season_mean", "first_p90_doy", "span_p90", "days_min_p90"):
+                for k in METRICS:
+                    if k.endswith("_doy") or k.endswith("_hour_lst"):
+                        cm[f"{k}_median"] = np.nanmedian(M[k], axis=0)
+                    else:
+                        cm[f"{k}_mean"] = np.nanmean(M[k], axis=0)
+                for name, k in (("record_max", "year_max"), ("record_min", "year_min")):
+                    A = M[k]
+                    has = np.isfinite(A).any(axis=0)
+                    fill = -np.inf if name == "record_max" else np.inf
+                    filled = np.where(np.isfinite(A), A, fill)
+                    idx = filled.argmax(axis=0) if name == "record_max" else filled.argmin(axis=0)
+                    cm[name] = np.where(has, filled[idx, np.arange(A.shape[1])], np.nan)
+                    cm[f"{name}_year"] = np.where(has, np.asarray(years)[idx], np.nan)
+            for k in CELL_TRENDS:
                 sl, S, n, p = theil_sen(yarr, M[k])
+                sig = fdr_mask(p)
+                inc, dec = (S > 0) & sig, (S < 0) & sig                 # direction from S (Sen slope can be 0 for counts)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    cm[f"{k}_tau"] = np.where(n >= MIN_TREND_YEARS, S / (n * (n - 1) / 2.0), np.nan)
                 cm[f"{k}_trend"] = sl * 10
                 cm[f"{k}_p"] = p
-                cm[f"{k}_sig"] = fdr_mask(p).astype(np.float32)
+                cm[f"{k}_sig"] = sig.astype(np.float32) * np.sign(S)       # +1 rising, -1 falling, 0 not significant
                 summary["indices"][v].setdefault("cell_trends", {})[k] = {
                     "cells_tested": int(np.isfinite(p).sum()),
-                    "cells_increasing_sig": int(((sl > 0) & (cm[f"{k}_sig"] > 0)).sum()),
-                    "cells_decreasing_sig": int(((sl < 0) & (cm[f"{k}_sig"] > 0)).sum()),
-                    "corridor_cells_increasing_sig": int(((sl[corr] > 0) & (cm[f"{k}_sig"][corr] > 0)).sum()),
-                    "corridor_cells_decreasing_sig": int(((sl[corr] < 0) & (cm[f"{k}_sig"][corr] > 0)).sum())}
-            cell_out[v] = {k: a.astype(np.float32) for k, a in cm.items()}
+                    "cells_increasing_sig": int(inc.sum()), "cells_decreasing_sig": int(dec.sum()),
+                    "corridor_cells_increasing_sig": int(inc[corr].sum()), "corridor_cells_decreasing_sig": int(dec[corr].sum()),
+                    "region_cells_increasing_sig": int(inc[rest].sum()), "region_cells_decreasing_sig": int(dec[rest].sum())}
+            summary["indices"][v]["null_test"] = self._null_test(fc, cm, w_corr, corr, rest)
+            cell_out[v] = {k: np.asarray(a_, dtype=np.float32) for k, a_ in cm.items()}
             # per line
             for fid in fids:
                 rows, km = cells[fid]["rows"], cells[fid]["km"]
                 r = feat_rows[fid]
                 if not len(rows):
                     continue
-                for k in ("days_p90", "days_p95", "days_p99", "annual_max", "season_mean", "spring_peak", "fall_peak", "first_p90_doy",
-                          "last_p90_doy", "span_p90", "peak_hour_lst", "min_season_mean", "days_min_p90"):
+                for k in LINE_METRICS:
                     A = M[k][:, rows]
                     fin = np.isfinite(A)
                     wk = np.where(fin, km, 0.0)
                     with np.errstate(invalid="ignore", divide="ignore"):
-                        series = np.where(wk.sum(axis=1) > 0, np.nansum(np.where(fin, A, 0) * wk, axis=1) / wk.sum(axis=1), np.nan)
+                        series = np.where(wk.sum(axis=1) > 0, (np.where(fin, A, 0) * wk).sum(axis=1) / np.maximum(1e-12, wk.sum(axis=1)),
+                                          np.nan)
                     r[f"{v}.{k}"] = mean_of(series)
-                    if k in ("days_p90", "days_p95", "annual_max", "first_p90_doy", "span_p90", "days_min_p90"):
+                    if k in LINE_TRENDS:
                         sl, S, n, p = theil_sen(yarr, series[:, None])
                         r[f"{v}.{k}.trend_per_decade"] = None if not np.isfinite(sl[0]) else round(float(sl[0] * 10), 4)
+                        r[f"{v}.{k}.tau"] = None if n[0] < MIN_TREND_YEARS else round(float(S[0] / (n[0] * (n[0] - 1) / 2)), 4)
                         r[f"{v}.{k}.p"] = None if not np.isfinite(p[0]) else round(float(p[0]), 4)
-                    if k in ("days_p90", "days_p95"):
+                        phr = mk_hamed_rao(yarr, series)
+                        r[f"{v}.{k}.p_hr"] = None if phr is None else round(phr, 4)
+                    if k in ("days_p90", "days_p95", "days_min_p90"):
                         r[f"{v}.{k}.last_10y"] = mean_of(series[recent])
                 with np.errstate(invalid="ignore"), _quiet():
-                    r[f"{v}.max_cell_days_p95"] = None if not np.isfinite(np.nanmax(cm["days_p95_mean"][rows])) else \
-                        round(float(np.nanmax(cm["days_p95_mean"][rows])), 3)
+                    for name in ("record_max", "record_min"):
+                        x = (np.nanmax if name == "record_max" else np.nanmin)(cm[name][rows])
+                        r[f"{v}.{name}"] = None if not np.isfinite(x) else round(float(x), 3)
+                    x = np.nanmax(cm["days_p95_mean"][rows])
+                    r[f"{v}.max_cell_days_p95"] = None if not np.isfinite(x) else round(float(x), 3)
             del M
         # 5. write products
         progress(done, steps, "writing results")
@@ -940,12 +1152,12 @@ class LineAnalysis:
         pd.DataFrame(yearly_rows).to_csv(tmp_dir / "yearly_corridor_vs_region.csv", index=False)
         pd.DataFrame(cycle_rows).to_csv(tmp_dir / "seasonal_cycle.csv", index=False)
         pts = self.grid.points
-        cols = {"point_id": pts.point_id.values, "latitude": pts.latitude.values.round(5),
-                "longitude": pts.longitude.values.round(5), "county": pts.county.values, "line_km": w_corr.round(4)}
-        for v, cm in cell_out.items():
-            for k, a in cm.items():
-                cols[f"{v}.{k}"] = np.where(np.isfinite(a), np.round(a, 4), np.nan)
-        pd.DataFrame(cols).to_csv(tmp_dir / "cells.csv", index=False)
+        for v, cm in cell_out.items():                                  # one table per index (QGIS-friendly size)
+            cols = {"point_id": pts.point_id.values, "latitude": pts.latitude.values.round(5),
+                    "longitude": pts.longitude.values.round(5), "county": pts.county.values, "line_km": w_corr.round(4)}
+            for k, a_ in cm.items():
+                cols[k] = np.where(np.isfinite(a_), np.round(a_, 4), np.nan)
+            pd.DataFrame(cols).to_csv(tmp_dir / f"cells_{v}.csv", index=False)
         np.savez_compressed(tmp_dir / "cells.npz", point_id=pts.point_id.values, line_km=w_corr,
                             **{f"{v}.{k}": a for v, cm in cell_out.items() for k, a in cm.items()})
         lines_fc = {"type": "FeatureCollection", "features": [
@@ -962,6 +1174,55 @@ class LineAnalysis:
         _swap_dir(tmp_dir, out_dir)
         progress(steps, steps, "done")
         return {"id": aid, "dir": str(out_dir), "features": len(fids), "corridor_cells": int(len(corr)), "years": len(years)}
+
+    NULL_KEYS = ["days_p90_mean", "days_p95_mean", "days_min_p90_mean", "year_max_mean", "season_max_mean", "season_mean_mean",
+                 "min_season_mean_mean", "span_p90_mean", "days_p90_trend", "year_max_trend", "season_max_trend"]
+
+    def _null_test(self, fc, cm, w_corr, corr, rest, n_shifts=NULL_SHIFTS, seed=20261021):
+        """Do the lines run through more dangerous places than lines of the same shape put elsewhere? The whole layer is
+        shifted to random positions (5-40 km in any direction) over the mainland; for each shift the corridor's cell
+        mean (each crossed cell counted once: places, not km) of every climatology / trend map is recomputed. Returns the
+        real value, the shifted ones' mean and 5-95% range, and the share of shifts at least as high (one-sided p)."""
+        rng = np.random.default_rng(seed)
+        idx = CellIndex(self.grid)
+        lon, lat, _ = [], [], []
+        for f in fc["features"]:
+            a_, b_, w_ = sample_line(f["geometry"])
+            lon.append(a_); lat.append(b_)
+        lon, lat = np.concatenate(lon), np.concatenate(lat)
+        mainland = self.grid.points.latitude.values < ISLE_ROYALE_LAT
+        real_rows = corr
+        out = {}
+        sims = {k: [] for k in self.NULL_KEYS if k in cm}
+        tries = 0
+        while min((len(v_) for v_ in sims.values()), default=n_shifts) < n_shifts and tries < n_shifts * 20:
+            tries += 1
+            dist, ang = rng.uniform(5, 40), rng.uniform(0, 2 * np.pi)
+            dx = dist * np.cos(ang) / (111.2 * np.cos(np.radians(46.7)))
+            dy = dist * np.sin(ang) / 111.2
+            rows = idx.rows(lon + dx, lat + dy)
+            ok = rows >= 0
+            if ok.mean() < 0.7:                                  # mostly in the lake or outside the counties: redraw
+                continue
+            rows = np.unique(rows[ok])
+            rows = rows[mainland[rows]]
+            if len(rows) < 0.5 * len(real_rows):
+                continue
+            for k in sims:
+                with np.errstate(invalid="ignore"), _quiet():
+                    sims[k].append(float(np.nanmean(cm[k][rows])))
+        for k, vals in sims.items():
+            vals = np.array([x for x in vals if np.isfinite(x)])
+            with np.errstate(invalid="ignore"), _quiet():
+                real = float(np.nanmean(cm[k][real_rows]))
+                reg = float(np.nanmean(cm[k][rest]))
+            if not len(vals) or not np.isfinite(real):
+                continue
+            out[k] = {"corridor": _r3(real), "region": _r3(reg), "shifted_mean": _r3(vals.mean()),
+                      "shifted_p05": _r3(np.percentile(vals, 5)), "shifted_p95": _r3(np.percentile(vals, 95)),
+                      "p_higher": round(float((np.sum(vals >= real) + 1) / (len(vals) + 1)), 4),
+                      "p_lower": round(float((np.sum(vals <= real) + 1) / (len(vals) + 1)), 4), "n_shifts": int(len(vals))}
+        return out
 
     # ---------------------------------------------------------------- reading results
     def list(self):
@@ -993,8 +1254,9 @@ class LineAnalysis:
             return z["point_id"].copy(), z[key].copy(), z["line_km"].copy()
 
     def file(self, aid, name):
-        if name not in ("summary.json", "lines.csv", "cells.csv", "yearly_corridor_vs_region.csv", "seasonal_cycle.csv",
-                        "lines_with_metrics.geojson", "README.txt"):
+        ok = {"summary.json", "lines.csv", "yearly_corridor_vs_region.csv", "seasonal_cycle.csv", "lines_with_metrics.geojson",
+              "README.txt"} | {f"cells_{v}.csv" for v in INDICES}
+        if name not in ok:
             raise ValueError("unknown file")
         return self._dir(aid) / name
 
@@ -1024,6 +1286,14 @@ def _swap_dir(tmp_dir: Path, out_dir: Path, tries=40, wait=0.25):
     shutil.rmtree(old, ignore_errors=True)
 
 
+def _r3(x):
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return None
+    return round(x, 3) if math.isfinite(x) else None
+
+
 def _json_default(o):
     if isinstance(o, (np.integer,)):
         return int(o)
@@ -1042,7 +1312,7 @@ def _readme(s) -> str:
              "  lines.csv                       one row per line feature (ranked), metrics per index: <index>.<metric>",
              "  yearly_corridor_vs_region.csv   each year's metric for the corridor (km-weighted) and the region (all cells)",
              "  seasonal_cycle.csv              mean seasonal cycle of the daily maxima, corridor vs region",
-             "  cells.csv                       every study cell: line km, climatology and trend of each metric",
+             "  cells_<index>.csv               every study cell: line km, climatology, record max/min, trends",
              "  lines_with_metrics.geojson      the lines with their metrics (QGIS/ArcGIS)",
              "  summary.json                    everything above in one file, with definitions and thresholds", "",
              "Definitions:"]

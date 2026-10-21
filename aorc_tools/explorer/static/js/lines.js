@@ -6,27 +6,50 @@
     metric: 'days_p95', cellKey: 'days_p95_mean', ymetric: 'days_p90', task: null, msg: '', shown: false };
   const IDX = ['FWI', 'FWI_daily', 'ERC', 'BI', 'FPI'];
   const IDX_LABEL = { FWI: 'FWI hourly (daily max)', FWI_daily: 'FWI classic daily', ERC: 'ERC', BI: 'BI', FPI: 'FPI' };
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  /* yearly metrics: label + group (the order shown) */
+  const YEARLY = {
+    year_max: 'year: highest daily maximum', year_min: 'year: lowest daily minimum', year_max_doy: 'year: date of the maximum',
+    year_min_doy: 'year: date of the minimum',
+    season_max: 'season (Mar–Nov): highest daily maximum', season_min: 'season: lowest daily minimum', season_mean: 'season: mean daily maximum',
+    min_season_mean: 'season: mean daily minimum (overnight recovery)', diurnal_range_mean: 'season: mean daily range (max − min)',
+    spring_peak: 'spring peak (smoothed max)', summer_trough: 'summer trough (smoothed max)', fall_peak: 'fall peak (smoothed max)',
+    spring_peak_doy: 'date of the spring peak', summer_trough_doy: 'date of the summer trough', fall_peak_doy: 'date of the fall peak',
+    spring_peak_of_min: 'spring peak of the daily minimum', summer_trough_of_min: 'summer trough of the daily minimum', fall_peak_of_min: 'fall peak of the daily minimum',
+    smoothed_max: 'season high of the smoothed max', smoothed_min: 'season low of the smoothed max',
+    days_p90: 'days above the 90th percentile', days_p95: 'days above the 95th', days_p99: 'days above the 99th',
+    days_min_p90: 'nights that do not recover (daily min above its 90th pct)',
+    first_p90_doy: 'first day above the 90th', last_p90_doy: 'last day above the 90th', span_p90: 'first-to-last span (days)',
+    core_first_p90_doy: 'robust season start (10% of high days)', core_last_p90_doy: 'robust season end (90%)', core_span_p90: 'robust season length (days)',
+    any_p90: 'share of cells with any day above the 90th',
+    peak_hour_lst: 'hour of the daily peak (LST)', trough_hour_lst: 'hour of the daily low (LST)' };
+  MONTHS.forEach((m, i) => { const k = String(i + 1).padStart(2, '0'); YEARLY[`m${k}_max`] = `${m}: highest daily maximum`; YEARLY[`m${k}_min`] = `${m}: lowest daily minimum`; });
+  const isDoy = k => /_doy$/.test(k);
   const LINE_METRICS = {
     days_p95: 'days/yr above the 95th pct', days_p90: 'days/yr above the 90th pct', days_p99: 'days/yr above the 99th pct',
-    'days_p95.last_10y': 'days/yr above 95th, last 10 years', 'days_p90.trend_per_decade': 'trend: days above 90th per decade',
-    annual_max: 'annual maximum', 'annual_max.trend_per_decade': 'trend: annual max per decade', spring_peak: 'spring peak (smoothed)',
-    fall_peak: 'fall peak (smoothed)', span_p90: 'high-danger season length (days)', first_p90_doy: 'first high-danger day (day of year)',
-    peak_hour_lst: 'hour of the daily peak (LST)', days_min_p90: 'nights that do not recover (days/yr)',
-    'days_min_p90.trend_per_decade': 'trend: nights that do not recover, per decade' };
+    'days_p95.last_10y': 'days/yr above 95th, last 10 years', 'days_p90.tau': 'trend (Kendall τ): days above 90th',
+    year_max: 'year maximum', year_min: 'year minimum', record_max: 'record maximum', record_min: 'record minimum',
+    'year_max.trend_per_decade': 'trend: year max per decade', spring_peak: 'spring peak', fall_peak: 'fall peak', summer_trough: 'summer trough',
+    span_p90: 'high-danger span (days)', first_p90_doy: 'first high-danger day', diurnal_range_mean: 'mean daily range',
+    peak_hour_lst: 'hour of the daily peak (LST)', trough_hour_lst: 'hour of the daily low (LST)', days_min_p90: 'nights that do not recover (days/yr)',
+    'days_min_p90.tau': 'trend (Kendall τ): nights that do not recover' };
   const CELL_FIELDS = {
     days_p95_mean: 'days/yr above the 95th percentile', days_p90_mean: 'days/yr above the 90th percentile', days_p99_mean: 'days/yr above the 99th',
-    annual_max_mean: 'mean annual maximum', season_mean_mean: 'mean daily max, Mar–Nov', spring_peak_mean: 'spring peak',
-    fall_peak_mean: 'fall peak', span_p90_mean: 'high-danger season length (days)', spring_peak_doy_median: 'date of the spring peak (day of year)',
-    fall_peak_doy_median: 'date of the fall peak (day of year)', peak_hour_lst_median: 'hour of the daily peak (LST)',
-    days_p90_trend: 'trend: days above 90th per decade', days_p95_trend: 'trend: days above 95th per decade',
-    annual_max_trend: 'trend: annual max per decade', first_p90_doy_trend: 'trend: first high-danger day (days per decade)',
-    span_p90_trend: 'trend: season length (days per decade)', days_p90_sig: 'days-above-90th trend significant (FDR 10%)',
-    min_season_mean_mean: 'mean daily minimum (overnight recovery)', days_min_p90_mean: 'nights that do not recover (days/yr)',
-    days_min_p90_trend: 'trend: nights that do not recover, per decade' };
-  const YEARLY = { days_p90: 'days above the 90th percentile', days_p95: 'days above the 95th', annual_max: 'annual maximum',
-    season_mean: 'mean daily max, Mar–Nov', spring_peak: 'spring peak', fall_peak: 'fall peak', summer_trough: 'summer trough',
-    first_p90_doy: 'first day above the 90th (day of year)', last_p90_doy: 'last day above the 90th (day of year)', span_p90: 'season length (days)',
-    min_season_mean: 'mean daily minimum (overnight recovery)', days_min_p90: 'nights that do not recover (daily min above its 90th pct)' };
+    days_min_p90_mean: 'nights that do not recover (days/yr)', record_max: 'record maximum (whole period)', record_min: 'record minimum',
+    record_max_year: 'year of the record maximum', year_max_mean: 'mean year maximum', year_min_mean: 'mean year minimum',
+    season_mean_mean: 'mean daily max, Mar–Nov', min_season_mean_mean: 'mean daily min, Mar–Nov', diurnal_range_mean_mean: 'mean daily range',
+    spring_peak_mean: 'spring peak', summer_trough_mean: 'summer trough', fall_peak_mean: 'fall peak',
+    spring_peak_doy_median: 'date of the spring peak (day of year)', fall_peak_doy_median: 'date of the fall peak (day of year)',
+    core_span_p90_mean: 'robust high-danger season length (days)', peak_hour_lst_median: 'hour of the daily peak (LST)',
+    trough_hour_lst_median: 'hour of the daily low (LST)',
+    days_p90_tau: 'trend (τ): days above the 90th', days_p95_tau: 'trend (τ): days above the 95th', days_min_p90_tau: 'trend (τ): nights that do not recover',
+    year_max_tau: 'trend (τ): year maximum', year_min_tau: 'trend (τ): year minimum', season_mean_tau: 'trend (τ): mean daily max',
+    first_p90_doy_tau: 'trend (τ): first high-danger day', span_p90_tau: 'trend (τ): span of the high-danger season',
+    days_p90_trend: 'Sen slope: days above 90th per decade', year_max_trend: 'Sen slope: year max per decade',
+    days_p90_sig: 'significant trend in days above 90th (FDR 10%): +1 rising, −1 falling',
+    year_max_sig: 'significant trend in the year maximum (FDR 10%)', days_min_p90_sig: 'significant trend in nights that do not recover' };
+  MONTHS.forEach((m, i) => { const k = String(i + 1).padStart(2, '0'); CELL_FIELDS[`m${k}_max_mean`] = `${m}: mean highest daily max`; CELL_FIELDS[`m${k}_min_mean`] = `${m}: mean lowest daily min`; });
+  const DIVERGING = k => /_(trend|tau|sig)$/.test(k);
   const cfgQ = () => 'config=' + encodeURIComponent(JSON.stringify(S.cfg || {}));
   const doyLabel = d => d == null ? '—' : new Date(Date.UTC(2001, 0, 1 + Math.round(d))).toISOString().slice(5, 10);
 
@@ -99,7 +122,7 @@
     try {
       const f = await W.api(`/api/lines/analyses/${encodeURIComponent(aid)}/cells?key=${encodeURIComponent(S.lines.index + '.' + S.lines.cellKey)}`);
       let lo = f.lo, hi = f.hi;
-      const div = /_trend$/.test(S.lines.cellKey);
+      const div = DIVERGING(S.lines.cellKey);
       if (div) { const a = Math.max(Math.abs(lo), Math.abs(hi)) || 1; lo = -a; hi = a; }
       W.paintValues(f.point_ids, f.values, lo, hi, false, div);
       W.legend(`${IDX_LABEL[S.lines.index]} · ${CELL_FIELDS[S.lines.cellKey]} (cells)`, lo, hi, div ? 'blue = falling · grey = no change · red = rising' : '', false, div);
@@ -133,11 +156,21 @@
     setTimeout(pollTask, 2000);
   }
 
+  /* a trend: Sen slope per decade, Kendall tau, and p corrected for serial correlation (Hamed-Rao) when available */
   function trendCell(t) {
-    if (!t || t.per_decade == null) return '<span class="r">—</span>';
-    const sig = t.p != null && t.p < 0.05;
-    return `${t.per_decade > 0 ? '+' : ''}${W.fmt(t.per_decade, 2)}/dec <small class="r">p ${W.fmt(t.p, 3)}${sig ? ' ✓' : ''}</small>`;
+    if (!t || (t.per_decade == null && t.tau == null)) return '<span class="r">—</span>';
+    const pv = t.p_hr ?? t.p, sig = pv != null && pv < 0.05;
+    const dir = t.tau != null ? (t.tau > 0 ? '↑' : t.tau < 0 ? '↓' : '·') : '';
+    return `${dir} ${t.per_decade != null ? (t.per_decade > 0 ? '+' : '') + W.fmt(t.per_decade, 2) + '/dec' : ''} <small class="r">τ ${W.fmt(t.tau, 2)} · p ${W.fmt(pv, 3)}${sig ? ' ✓' : ''}</small>`;
   }
+  const GROUPS = [
+    ['Year (global)', ['year_max', 'year_max_doy', 'year_min', 'year_min_doy']],
+    ['Season, Mar–Nov', ['season_max', 'season_min', 'season_mean', 'min_season_mean', 'diurnal_range_mean']],
+    ['Seasonal peaks and troughs (15-day smoothed)', ['spring_peak', 'spring_peak_doy', 'summer_trough', 'summer_trough_doy', 'fall_peak', 'fall_peak_doy',
+      'spring_peak_of_min', 'summer_trough_of_min', 'fall_peak_of_min']],
+    ['How often it is high', ['days_p90', 'days_p95', 'days_p99', 'days_min_p90', 'any_p90']],
+    ['High-danger season', ['first_p90_doy', 'last_p90_doy', 'span_p90', 'core_first_p90_doy', 'core_last_p90_doy', 'core_span_p90']],
+    ['Hour of day', ['peak_hour_lst', 'trough_hour_lst']]];
 
   W.renderLines = function (b) {
     const L = S.lines, sm = L.summary, lay = (L.layers || []).find(l => l.id === L.layer);
@@ -145,9 +178,10 @@
     const aid = analysisId();
     let html = `<div class="sect"><h2>Power lines and fire danger</h2>
       <div class="callout">Where do the lines run through the places, seasons and years with the highest fire danger, and is it increasing?
-      For each index the saved record gives every cell's <b>seasonality</b> (spring peak, summer trough, fall peak, first and last high-danger day)
-      and <b>intensity</b> (annual maximum, days above the region's 90th/95th/99th percentiles), and their <b>trends</b> (Theil–Sen, Mann–Kendall).
-      The lines' cells (km-weighted) are compared with the whole region. This is fire-<i>weather</i> danger along the lines: not ignition probability, not consequence.
+      For each index, every cell gets the <b>maximum and minimum at every timescale</b> (hour of day, day, month, season with its spring/fall peaks and summer trough, year, whole record),
+      how often danger is high, when the high-danger season starts and ends, and the <b>trend</b> of each over the years (Theil–Sen, Mann–Kendall).
+      The lines' cells (km-weighted) are compared with <b>the rest of the mainland WUP</b>, and with the same lines shifted to random places.
+      This is fire-<i>weather</i> danger along the lines: not ignition probability, not consequence.
       ${S.status?.synthetic ? '<br><b style="color:#f0c27a">Demo mode: synthetic weather — the numbers say nothing about the real lines.</b>' : ''}</div>
       <div class="row" style="gap:6px;flex-wrap:wrap;align-items:center">
         <label>Layer <select id="ln-layer">${(L.layers || []).map(l => `<option value="${W.esc(l.id)}" ${l.id === L.layer ? 'selected' : ''}>${W.esc(l.name || l.id)} (${W.fmt(l.km, 0)} km)</option>`).join('')}</select></label>
@@ -175,48 +209,69 @@
       <div id="ln-msg" class="hint">${L.msg || ''}</div>`;
     if (sm && ix && !ix.skipped) {
       const cor = sm.corridor, tr = ix.trends || {};
+      const fmtk = (k, x) => isDoy(k) ? doyLabel(x) : (k === 'any_p90' ? W.pct(100 * (x ?? 0), 0) : W.fmt(x, 2));
+      const row = k => `<tr><td>${W.esc(YEARLY[k] || k)}</td><td class="v">${fmtk(k, ix.corridor[k])}</td><td class="v">${fmtk(k, ix.region[k])}</td>
+            <td>${trendCell(tr[k]?.corridor)}</td><td>${trendCell(tr[k]?.region)}</td><td>${trendCell(tr[k]?.corridor_minus_region)}</td></tr>`;
+      const rec = ix.record || {};
+      const nt = ix.null_test || {};
       html += `<h3>Results · ${W.esc(sm.layer?.name || '')} · ${W.esc(sm.source)} · ${sm.years[0]}–${sm.years[sm.years.length - 1]} <small class="r">(${W.esc(sm.created)})</small></h3>
         <div class="row" style="gap:6px;flex-wrap:wrap">${IDX.filter(v => sm.indices[v]).map(v => `<button class="btn sm ${v === L.index ? '' : 'ghost'}" data-lix="${v}">${IDX_LABEL[v]}</button>`).join('')}</div>
-        <div class="hint">Corridor: ${cor.cells.toLocaleString()} cells (${W.pct(100 * cor.share_of_region_cells, 1)} of the region), ${W.fmt(cor.km_in_cells, 1)} km of line inside study cells
-          (${W.fmt(cor.km_outside_cells, 1)} km over water or outside). Regional thresholds of the daily maximum (Mar–Nov, ${sm.reference_years.join('–')}):
-          90th <b>${W.fmt(ix.thresholds.p90)}</b> · 95th <b>${W.fmt(ix.thresholds.p95)}</b> · 99th <b>${W.fmt(ix.thresholds.p99)}</b>.</div>
-        <table class="t" style="margin-top:6px"><thead><tr><th></th><th style="text-align:right">Corridor</th><th style="text-align:right">Region</th>
-          <th>Corridor trend</th><th>Region trend</th><th>Corridor − region trend</th></tr></thead><tbody>
-        ${['days_p90', 'days_p95', 'annual_max', 'season_mean', 'spring_peak', 'fall_peak', 'first_p90_doy', 'last_p90_doy', 'span_p90', 'min_season_mean', 'days_min_p90'].filter(k => ix.corridor[k] != null || ix.region[k] != null).map(k => {
-          const isDoy = /_doy$/.test(k), f = x => isDoy ? doyLabel(x) : W.fmt(x, 2);
-          return `<tr><td>${W.esc(YEARLY[k] || k)}</td><td class="v">${f(ix.corridor[k])}</td><td class="v">${f(ix.region[k])}</td>
-            <td>${trendCell(tr[k]?.corridor)}</td><td>${trendCell(tr[k]?.region)}</td><td>${trendCell(tr[k]?.corridor_minus_region)}</td></tr>`; }).join('')}
+        <div class="hint">Corridor: ${cor.cells.toLocaleString()} cells (${W.pct(100 * cor.share_of_region_cells, 1)} of the mainland), ${W.fmt(cor.km_in_cells, 1)} km of line inside study cells
+          (${W.fmt(cor.km_outside_cells, 1)} km over water or outside). Comparator: the other ${(cor.region_cells || 0).toLocaleString()} mainland cells.
+          Thresholds of the daily maximum (all mainland cells, Mar–Nov, ${(ix.threshold_years || sm.reference_years).join('–')}):
+          90th <b>${W.fmt(ix.thresholds.p90)}</b> · 95th <b>${W.fmt(ix.thresholds.p95)}</b> · 99th <b>${W.fmt(ix.thresholds.p99)}</b>${ix.threshold_min_p90 != null ? ` · 90th of daily minima <b>${W.fmt(ix.threshold_min_p90)}</b>` : ''}.
+          Record: corridor max ${W.fmt(rec.corridor_max?.value)} (${rec.corridor_max?.year ?? '—'}), min ${W.fmt(rec.corridor_min?.value)} (${rec.corridor_min?.year ?? '—'});
+          rest max ${W.fmt(rec.region_max?.value)} (${rec.region_max?.year ?? '—'}), min ${W.fmt(rec.region_min?.value)} (${rec.region_min?.year ?? '—'}).</div>
+        <table class="t" style="margin-top:6px"><thead><tr><th></th><th style="text-align:right">Corridor</th><th style="text-align:right">Rest</th>
+          <th>Corridor trend</th><th>Rest trend</th><th>Corridor − rest</th></tr></thead><tbody>
+        ${GROUPS.map(([g, ks]) => { const rs = ks.filter(k => ix.corridor[k] != null || ix.region[k] != null);
+          return rs.length ? `<tr><td colspan="6" style="padding-top:8px"><b>${g}</b></td></tr>` + rs.map(row).join('') : ''; }).join('')}
         </tbody></table>
-        <div class="hint">Mean seasonal cycle — corridor: spring peak ${W.fmt(ix.cycle.corridor.spring_peak.value)} (${ix.cycle.corridor.spring_peak.date || '—'}),
-          summer trough ${W.fmt(ix.cycle.corridor.summer_trough.value)} (${ix.cycle.corridor.summer_trough.date || '—'}), fall peak ${W.fmt(ix.cycle.corridor.fall_peak.value)} (${ix.cycle.corridor.fall_peak.date || '—'});
-          region: ${W.fmt(ix.cycle.region.spring_peak.value)} (${ix.cycle.region.spring_peak.date || '—'}) / ${W.fmt(ix.cycle.region.summer_trough.value)} / ${W.fmt(ix.cycle.region.fall_peak.value)} (${ix.cycle.region.fall_peak.date || '—'}).
-          Years with more days above the 95th in the corridor than the region: ${ix.years_corridor_above_region.days_p95} of ${ix.valid_years.length}.
-          ✓ = p &lt; 0.05 (Mann–Kendall; not corrected for autocorrelation).</div>
+        <div class="hint">Trend: ↑/↓ direction (Kendall τ), Sen slope per decade, p corrected for serial correlation (Hamed–Rao); ✓ = p &lt; 0.05.
+          Mean seasonal cycle — corridor: spring peak ${W.fmt(ix.cycle.corridor.spring_peak.value)} (${ix.cycle.corridor.spring_peak.date || '—'}),
+          summer trough ${W.fmt(ix.cycle.corridor.summer_trough.value)} (${ix.cycle.corridor.summer_trough.date || '—'}), fall peak ${W.fmt(ix.cycle.corridor.fall_peak.value)} (${ix.cycle.corridor.fall_peak.date || '—'}).</div>
         <div id="ln-cycle"></div>
-        <div class="row" style="gap:6px;align-items:center;margin-top:4px">Yearly: <select id="ln-ym">${Object.entries(YEARLY).map(([k, t]) => `<option value="${k}" ${k === L.ymetric ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+        <h3>Each month: highest daily maximum and lowest daily minimum</h3>
+        <table class="t"><thead><tr><th>Month</th><th style="text-align:right">Max corridor</th><th style="text-align:right">Max rest</th><th>Max trend (corridor)</th>
+          <th style="text-align:right">Min corridor</th><th style="text-align:right">Min rest</th><th>Min trend (corridor)</th></tr></thead><tbody>
+        ${MONTHS.map((m, i) => { const k = String(i + 1).padStart(2, '0'), a_ = `m${k}_max`, b_ = `m${k}_min`;
+          if (ix.corridor[a_] == null && ix.region[a_] == null) return '';
+          return `<tr><td>${m}</td><td class="v">${W.fmt(ix.corridor[a_])}</td><td class="v">${W.fmt(ix.region[a_])}</td><td>${trendCell(tr[a_]?.corridor)}</td>
+            <td class="v">${W.fmt(ix.corridor[b_])}</td><td class="v">${W.fmt(ix.region[b_])}</td><td>${trendCell(tr[b_]?.corridor)}</td></tr>`; }).join('')}
+        </tbody></table>
+        <div class="row" style="gap:6px;align-items:center;margin-top:8px">Yearly: <select id="ln-ym">${Object.entries(YEARLY).filter(([k]) => ix.corridor[k] != null || ix.region[k] != null).map(([k, t]) => `<option value="${k}" ${k === L.ymetric ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
         <div id="ln-yearly"></div>
+        ${Object.keys(nt).length ? `<h3>Do the lines run through more dangerous places than chance?</h3>
+        <table class="t"><thead><tr><th>Cell climatology / trend</th><th style="text-align:right">Lines</th><th style="text-align:right">Rest</th>
+          <th style="text-align:right">Same lines shifted (mean, 5–95%)</th><th style="text-align:right">p (higher)</th><th style="text-align:right">p (lower)</th></tr></thead><tbody>
+        ${Object.entries(nt).map(([k, x]) => `<tr><td>${W.esc(CELL_FIELDS[k] || k)}</td><td class="v">${W.fmt(x.corridor)}</td><td class="v">${W.fmt(x.region)}</td>
+          <td class="v">${W.fmt(x.shifted_mean)} <small class="r">(${W.fmt(x.shifted_p05)}–${W.fmt(x.shifted_p95)})</small></td>
+          <td class="v">${W.fmt(x.p_higher, 3)}${x.p_higher < 0.05 ? ' ✓' : ''}</td><td class="v">${W.fmt(x.p_lower, 3)}${x.p_lower < 0.05 ? ' ✓' : ''}</td></tr>`).join('')}
+        </tbody></table>
+        <div class="hint">${Object.values(nt)[0]?.n_shifts ?? ''} copies of the whole layer moved 5–40 km in random directions (kept where ≥ 70% stays on the mainland); each crossed cell counted once.
+          p (higher) = share of shifted copies at least as high as the real lines.</div>` : ''}
         <h3>Map</h3>
         <div class="row" style="gap:6px;flex-wrap:wrap;align-items:center">
           <label>Colour lines by <select id="ln-metric">${Object.entries(LINE_METRICS).map(([k, t]) => `<option value="${k}" ${k === L.metric ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
           <label>Paint cells <select id="ln-cell">${Object.entries(CELL_FIELDS).map(([k, t]) => `<option value="${k}" ${k === L.cellKey ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
           <button class="btn sm" id="ln-paint">Paint cells</button>
         </div>
-        <div class="hint">Cell trends: ${(() => { const c = ix.cell_trends?.days_p90; return c ? `days above the 90th rising significantly in ${c.cells_increasing_sig.toLocaleString()} of ${c.cells_tested.toLocaleString()} cells
-          (falling in ${c.cells_decreasing_sig.toLocaleString()}); along the lines: ${c.corridor_cells_increasing_sig} rising, ${c.corridor_cells_decreasing_sig} falling (false discovery rate 10%).` : '—'; })()}</div>
+        <div class="hint">Cell trends (false discovery rate 10%): ${['days_p90', 'year_max', 'days_min_p90'].map(k => { const c = ix.cell_trends?.[k]; return c ? `${W.esc(YEARLY[k])}: rising in ${c.cells_increasing_sig.toLocaleString()} and falling in ${c.cells_decreasing_sig.toLocaleString()} of ${c.cells_tested.toLocaleString()} cells (along the lines ${c.corridor_cells_increasing_sig} ↑ / ${c.corridor_cells_decreasing_sig} ↓)` : ''; }).filter(Boolean).join('; ')}.</div>
         <h3>Lines ranked by ${W.esc(IDX_LABEL[L.index])} days above the 95th percentile</h3>
         <div style="max-height:320px;overflow:auto"><table class="t"><thead><tr><th>#</th><th>Line</th><th style="text-align:right">kV</th><th>Owner</th><th style="text-align:right">km</th>
-          <th style="text-align:right">days &gt;95th /yr</th><th style="text-align:right">last 10 y</th><th>trend days &gt;90th</th><th style="text-align:right">annual max</th>
-          <th style="text-align:right">spring / fall peak</th><th style="text-align:right">peak hour</th></tr></thead><tbody>
+          <th style="text-align:right">days &gt;95th /yr</th><th style="text-align:right">last 10 y</th><th>trend days &gt;90th</th><th style="text-align:right">year max / min</th>
+          <th style="text-align:right">record max / min</th><th style="text-align:right">spring / fall peak</th><th style="text-align:right">peak / low hour</th></tr></thead><tbody>
         ${[...sm.features].sort((a, b) => (b[`${L.index}.days_p95`] ?? -1) - (a[`${L.index}.days_p95`] ?? -1)).map((r, i) => `<tr data-lid="${W.esc(r.id)}" class="${r.id === L.focus ? 'fdi' : ''}">
           <td>${i + 1}</td><td><b>${W.esc(r.name || r.id)}</b><div class="r">${W.esc(r.county || '')}${r.sub_1 ? ` · ${W.esc(r.sub_1)} – ${W.esc(r.sub_2 || '')}` : ''}</div></td>
           <td class="v">${r.voltage_kv ?? (r.voltage_best_kv != null ? r.voltage_best_kv + '*' : '—')}${r.alt_voltage_disagrees ? ` <small class="r" title="the other layer says ${r.alt_voltage_kv} kV">≠${r.alt_voltage_kv}</small>` : ''}</td>
           <td class="r">${W.esc(r.owner || (r.owner_best ? r.owner_best + ' *' : '—'))}${r.owner && r.alt_owner && r.alt_owner.toLowerCase() !== String(r.owner).toLowerCase() ? `<br><small>other layer: ${W.esc(r.alt_owner)}</small>` : ''}</td><td class="v">${W.fmt(r.km_in_cells, 1)}</td>
           <td class="v">${W.fmt(r[`${L.index}.days_p95`], 1)}</td><td class="v">${W.fmt(r[`${L.index}.days_p95.last_10y`], 1)}</td>
-          <td>${trendCell({ per_decade: r[`${L.index}.days_p90.trend_per_decade`], p: r[`${L.index}.days_p90.p`] })}</td>
-          <td class="v">${W.fmt(r[`${L.index}.annual_max`], 1)}</td><td class="v">${W.fmt(r[`${L.index}.spring_peak`], 1)} / ${W.fmt(r[`${L.index}.fall_peak`], 1)}</td>
-          <td class="v">${W.fmt(r[`${L.index}.peak_hour_lst`], 0)}</td></tr>`).join('')}
+          <td>${trendCell({ per_decade: r[`${L.index}.days_p90.trend_per_decade`], tau: r[`${L.index}.days_p90.tau`], p: r[`${L.index}.days_p90.p`], p_hr: r[`${L.index}.days_p90.p_hr`] })}</td>
+          <td class="v">${W.fmt(r[`${L.index}.year_max`], 1)} / ${W.fmt(r[`${L.index}.year_min`], 1)}</td><td class="v">${W.fmt(r[`${L.index}.record_max`], 1)} / ${W.fmt(r[`${L.index}.record_min`], 1)}</td>
+          <td class="v">${W.fmt(r[`${L.index}.spring_peak`], 1)} / ${W.fmt(r[`${L.index}.fall_peak`], 1)}</td>
+          <td class="v">${W.fmt(r[`${L.index}.peak_hour_lst`], 0)} / ${W.fmt(r[`${L.index}.trough_hour_lst`], 0)}</td></tr>`).join('')}
         </tbody></table></div>
-        <div class="hint">Downloads: ${['lines.csv', 'yearly_corridor_vs_region.csv', 'seasonal_cycle.csv', 'cells.csv', 'lines_with_metrics.geojson', 'summary.json', 'README.txt']
+        <div class="hint">Downloads: ${['lines.csv', 'yearly_corridor_vs_region.csv', 'seasonal_cycle.csv', ...IDX.filter(v => sm.indices[v] && !sm.indices[v].skipped).map(v => `cells_${v}.csv`), 'lines_with_metrics.geojson', 'summary.json', 'README.txt']
           .map(n => `<a href="${W.API}/api/lines/analyses/${encodeURIComponent(aid)}/file/${n}">${n}</a>`).join(' · ')}
           <br>Caveats: ${sm.caveats.map(W.esc).join(' ')}</div>`;
     } else if (sm && ix?.skipped) {
@@ -267,7 +322,9 @@
     if (!r.length) return;
     const col = W.COLOR[S.lines.index === 'FWI_daily' ? 'FWI' : S.lines.index] || '#f0a24b';
     W.drawLineChart(box, { times: r.map(x => new Date(Date.UTC(2001, 0, 1 + x.doy))), daily: true,
-      lines: [{ v: r.map(x => x.region), color: '#9aa0a6', w: 1.4, dash: '4 3', label: 'region' }, { v: r.map(x => x.corridor), color: col, w: 2, label: 'line corridor' }],
+      lines: [{ v: r.map(x => x.region), color: '#9aa0a6', w: 1.4, dash: '4 3', label: 'rest: daily max' }, { v: r.map(x => x.corridor), color: col, w: 2, label: 'lines: daily max' },
+        ...(r.some(x => x.corridor_min != null && x.corridor_min !== x.corridor) ? [{ v: r.map(x => x.region_min), color: '#9aa0a6', w: 1, dash: '2 3', label: 'rest: daily min' },
+          { v: r.map(x => x.corridor_min), color: col, w: 1.2, dash: '5 2', label: 'lines: daily min' }] : [])],
       title: `${IDX_LABEL[S.lines.index]}: mean seasonal cycle (15-day smoothed)`,
       height: 190, xFmt: d => d.toISOString().slice(5, 10), tip: true, tipTime: d => d.toISOString().slice(5, 10) });
   }
@@ -279,7 +336,7 @@
     if (!r.length) { box.innerHTML = ''; return; }
     const col = W.COLOR[S.lines.index === 'FWI_daily' ? 'FWI' : S.lines.index] || '#f0a24b';
     W.drawLineChart(box, { times: r.map(x => new Date(Date.UTC(x.year, 6, 1))), daily: true,
-      lines: [{ v: r.map(x => x.region), color: '#9aa0a6', w: 1.4, dash: '4 3', label: 'region' }, { v: r.map(x => x.corridor), color: col, w: 2, label: 'line corridor' }],
+      lines: [{ v: r.map(x => x.region), color: '#9aa0a6', w: 1.4, dash: '4 3', label: 'rest of mainland' }, { v: r.map(x => x.corridor), color: col, w: 2, label: 'lines' }],
       title: `${IDX_LABEL[S.lines.index]}: ${YEARLY[S.lines.ymetric].replace(/ \(.*\)$/, '')}`, height: 180,
       xFmt: d => String(d.getUTCFullYear()), tip: true, tipTime: d => String(d.getUTCFullYear()) });
   }

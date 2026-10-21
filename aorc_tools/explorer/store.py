@@ -65,7 +65,9 @@ FILL_U1 = np.uint8(255)
 from aorc_tools.explorer.hdf import HDF_LOCK as NC_LOCK  # noqa: E402  (one lock for all HDF5 use)
 from aorc_tools.explorer.runtime import fsync_file, replace_file  # noqa: E402
 
-DAILY_FORMAT = 2        # 2: daily minima added; older daily files are rebuilt
+DAILY_FORMAT = 4        # 2: daily minima; 3: hour of the minimum; 4: part-days left out, Dec 31 completed, tie-midpoint
+                        # hours, hourly FWI at noon. Older daily files are rebuilt
+MIN_DAY_HOURS = 20      # a local day needs this many saved hours to get a daily maximum / minimum
 TIME_UNITS = "hours since 1979-01-01 00:00:00"
 T_EPOCH = pd.Timestamp("1979-01-01")
 COUNTIES = ["Baraga", "Gogebic", "Houghton", "Iron", "Keweenaw", "Ontonagon"]
@@ -626,11 +628,15 @@ class ResultsStore:
         return out
 
     # ------------------------------------------------------------------ daily maxima (local standard days)
-    def year_signature(self, source, cfg_id, year) -> str:
-        """Changes whenever a chunk of that year is added, recomputed or marked continuous."""
+    def year_signature(self, source, cfg_id, year, k=None) -> str:
+        """Changes whenever a chunk of that year (or only chunk ``k``) is added, recomputed or marked continuous."""
+        q = "SELECT COUNT(*), MAX(rowid), SUM(continuity='continuous'), MAX(t_end) FROM chunks WHERE source=? AND config_id=? AND year=?"
+        args = [source, cfg_id, int(year)]
+        if k is not None:
+            q += " AND k=?"
+            args.append(int(k))
         with self.ws.conn() as c:
-            r = c.execute("SELECT COUNT(*), MAX(rowid), SUM(continuity='continuous'), MAX(t_end) FROM chunks "
-                          "WHERE source=? AND config_id=? AND year=?", (source, cfg_id, int(year))).fetchone()
+            r = c.execute(q, args).fetchone()
         return "|".join(str(x) for x in tuple(r))
 
     def daily_path(self, source, cfg_id, year) -> Path:
@@ -644,8 +650,9 @@ class ResultsStore:
         files = self.files(source, cfg_id, year)
         if not files:
             return None
+        nxt = [f for f in self.files(source, cfg_id, year + 1) if int(f.get("k", 99)) == 0]   # completes Dec 31
         path = self.daily_path(source, cfg_id, year)
-        sig = self.year_signature(source, cfg_id, year)
+        sig = self.year_signature(source, cfg_id, year) + "|" + self.year_signature(source, cfg_id, year + 1, k=0)
         if path.exists() and not force:
             try:
                 with NC_LOCK, netCDF4.Dataset(path) as ds:
@@ -656,14 +663,17 @@ class ResultsStore:
         with NC_LOCK:
             with netCDF4.Dataset(files[0]["path"]) as src0:
                 cfg = ChainConfig.from_dict(json.loads(src0.config_json))
-        nd, dmax, dhr = self._daily_arrays(files, year)
+        nd, dmax, dhr = self._daily_arrays(files + nxt, year)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._write_daily(path, year, nd, dmax, dhr, source, cfg, catalog_sig=sig)
         return path
 
     def _daily_arrays(self, files, year):
-        """Each index's maximum over each cell's local standard day (FWI_daily: its 12:00 LST value), and the local
-        hour of the maximum; computed in cell space, one chunk file at a time."""
+        """Each index's maximum and minimum over each cell's local standard day (FWI_daily: its 12:00 LST value), the
+        local hours of the maximum and the minimum (the middle of tied hours), and hourly FWI at 12:00 LST.
+        Days with fewer than MIN_DAY_HOURS saved hours (gaps in the record, the end of the data) are left out (NaN)
+        rather than summarised from part of the day. Pass the next year's first chunk file(s) too, so Dec 31 (which
+        ends at 05-06 UTC on Jan 1) is complete."""
         off = self.grid.points.std_offset_h.values.astype(int)
         d0 = pd.Timestamp(year, 1, 1)
         nd = 366 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 365
@@ -671,43 +681,70 @@ class ResultsStore:
         dmax = {v: np.full((nd, n_c), np.nan, dtype=np.float32) for v in SAVED}
         dhr = {v: np.full((nd, n_c), -1, dtype=np.int8) for v in SAVED}
         dmin = {v: np.full((nd, n_c), np.nan, dtype=np.float32) for v in SAVED if v != "FWI_daily"}
+        dhr_min = {v: np.full((nd, n_c), -1, dtype=np.int8) for v in dmin}
+        nh = {v: np.zeros((nd, n_c), dtype=np.int8) for v in dmin}             # saved hours per local day
+        noon = np.full((nd, n_c), np.nan, dtype=np.float32)                     # hourly FWI at 12:00 LST
+        seen = set()
         for f in files:
+            if f["path"] in seen:
+                continue
+            seen.add(f["path"])
             raw = self._read(f["path"], SAVED)
             hrs = ((raw["_times"] - d0) / pd.Timedelta("1h")).astype(np.int64).values
             for v in SAVED:
                 if v not in raw:
                     continue
                 a = self.unpack(v, raw[v][:, self.y, self.x])                    # (n_t, n_cells)
-                if v == "FWI_daily":                                          # a daily value: take it at 12:00 LST
-                    for o in np.unique(off):
-                        cm = np.where(off == o)[0]
-                        lh = hrs + o
-                        sel = np.where(lh % 24 == 12)[0]
-                        di = lh[sel] // 24
-                        okd = (di >= 0) & (di < nd)
-                        dmax[v][np.ix_(di[okd], cm)] = a[np.ix_(sel[okd], cm)]
-                        dhr[v][np.ix_(di[okd], cm)] = 12
-                    continue
                 for o in np.unique(off):
                     cm = np.where(off == o)[0]
                     lh = hrs + o
                     day, hod = lh // 24, lh % 24
+                    if v in ("FWI_daily", "FWI"):                               # values at 12:00 LST
+                        sel = np.where((hod == 12) & (day >= 0) & (day < nd))[0]
+                        if len(sel):
+                            tgt = dmax[v] if v == "FWI_daily" else noon
+                            tgt[np.ix_(day[sel], cm)] = a[np.ix_(sel, cm)]
+                            if v == "FWI_daily":
+                                dhr[v][np.ix_(day[sel], cm)] = 12
+                        if v == "FWI_daily":
+                            continue
                     for di in np.unique(day):
                         if di < 0 or di >= nd:
                             continue
                         tm = np.where(day == di)[0]
                         blk = a[np.ix_(tm, cm)]
+                        fin = np.isfinite(blk)
+                        if not fin.any():
+                            continue
+                        nh[v][di, cm] += fin.sum(axis=0).astype(np.int8)
+                        h = hod[tm].astype(float)[:, None]
                         with warnings.catch_warnings():
                             warnings.simplefilter("ignore", RuntimeWarning)
                             mx = np.nanmax(blk, axis=0)
-                            dmin[v][di, cm] = np.fmin(dmin[v][di, cm], np.nanmin(blk, axis=0))
+                            mn = np.nanmin(blk, axis=0)
+                            hmx = np.rint(np.nansum(np.where(fin & (blk == mx), h, np.nan), axis=0)
+                                          / np.maximum(1, (fin & (blk == mx)).sum(axis=0)))
+                            hmn = np.rint(np.nansum(np.where(fin & (blk == mn), h, np.nan), axis=0)
+                                          / np.maximum(1, (fin & (blk == mn)).sum(axis=0)))
                         cur = dmax[v][di, cm]
                         better = np.isfinite(mx) & (~np.isfinite(cur) | (mx > cur))
                         if better.any():
-                            amx = np.argmax(np.where(np.isfinite(blk), blk, -np.inf), axis=0)
                             dmax[v][di, cm[better]] = mx[better]
-                            dhr[v][di, cm[better]] = hod[tm][amx[better]].astype(np.int8)
+                            dhr[v][di, cm[better]] = hmx[better].astype(np.int8)
+                        curm = dmin[v][di, cm]
+                        lower = np.isfinite(mn) & (~np.isfinite(curm) | (mn < curm))
+                        if lower.any():
+                            dmin[v][di, cm[lower]] = mn[lower]
+                            dhr_min[v][di, cm[lower]] = hmn[lower].astype(np.int8)
+        for v in dmin:                                          # part-days are not days
+            short = nh[v] < MIN_DAY_HOURS
+            dmax[v][short] = np.nan
+            dmin[v][short] = np.nan
+            dhr[v][short] = -1
+            dhr_min[v][short] = -1
         dmax["_min"] = dmin                                     # carried along with the maxima
+        dmax["_noon"] = noon
+        dhr["_min"] = dhr_min
         return nd, dmax, dhr
 
     def _write_daily(self, daily, year, nd, dmax, dhr, source, cfg, catalog_sig=None):
@@ -727,6 +764,18 @@ class ResultsStore:
                 la = out.createVariable("latitude", "f8", ("latitude",)); la.units, la.standard_name = "degrees_north", "latitude"; la[:] = self.lat
                 lo = out.createVariable("longitude", "f8", ("longitude",)); lo.units, lo.standard_name = "degrees_east", "longitude"; lo[:] = self.lon
             dmin = dmax.get("_min", {})
+            if "_noon" in dmax:
+                s_, ln_, units_, _ = PACK["FWI"]
+                g = np.full((nd, self.ny, self.nx), FILL_I2, dtype=np.int16)
+                g[:, self.y, self.x] = np.where(np.isfinite(dmax["_noon"]), np.round(dmax["_noon"] / s_), FILL_I2).astype(np.int16)
+                with NC_LOCK:
+                    var = out.createVariable("FWI_noon", "i2", ("time", "latitude", "longitude"), fill_value=FILL_I2,
+                                             chunksizes=(31, 64, 64), **COMP)
+                    var.scale_factor, var.add_offset = np.float32(s_), np.float32(0)
+                    var.long_name, var.units = f"{ln_} at 12:00 LST (hourly system, for comparison with FWI_daily_noon)", units_
+                    var.set_auto_maskandscale(False)
+                    var[:] = g
+                del g
             for v in SAVED:                                          # one variable per lock hold (see export_year)
                 s, ln, units, _ = PACK[v]
                 if v in dmin:
@@ -740,6 +789,15 @@ class ResultsStore:
                         var.set_auto_maskandscale(False)
                         var[:] = g
                     del g
+                    gh = np.full((nd, self.ny, self.nx), -1, dtype=np.int8)
+                    gh[:, self.y, self.x] = dhr["_min"][v]
+                    with NC_LOCK:
+                        hv = out.createVariable(f"{v}_hour_of_min", "i1", ("time", "latitude", "longitude"), fill_value=np.int8(-1),
+                                                chunksizes=(31, 64, 64), **COMP)
+                        hv.long_name = f"local standard hour (0-23) when {v} was lowest"
+                        hv.set_auto_maskandscale(False)
+                        hv[:] = gh
+                    del gh
                 vname = "FWI_daily_noon" if v == "FWI_daily" else f"{v}_daily_max"
                 g = np.full((nd, self.ny, self.nx), FILL_I2, dtype=np.int16)
                 g[:, self.y, self.x] = np.where(np.isfinite(dmax[v]), np.round(dmax[v] / s), FILL_I2).astype(np.int16)
@@ -849,7 +907,8 @@ class ResultsStore:
         fsync_file(tmp)
         _replace(tmp, hourly)
 
-        nd, dmax, dhr = self._daily_arrays(files, year)
+        nxt = [f for f in self.files(source, cfg_id, year + 1) if int(f.get("k", 99)) == 0]
+        nd, dmax, dhr = self._daily_arrays(files + nxt, year)
         self._write_daily(daily, year, nd, dmax, dhr, source, cfg)
         return {"hourly": str(hourly), "daily": str(daily), "hourly_bytes": hourly.stat().st_size,
                 "daily_bytes": daily.stat().st_size, "chunk_files": len(files)}

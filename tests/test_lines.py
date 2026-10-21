@@ -53,27 +53,44 @@ def test_fdr_controls_false_discoveries():
     assert not L.fdr_mask(np.full(5, np.nan)).any()
 
 
-def test_year_metrics_find_spring_and_fall_peaks():
+def test_year_metrics_maxima_and_minima_at_every_timescale():
     year = 2001
     d = np.arange(365)
     base = 2 + 18 * np.exp(-0.5 * ((d - 125) / 12) ** 2) + 10 * np.exp(-0.5 * ((d - 280) / 15) ** 2)   # May 5 / Oct 7
     X = np.vstack([base, base * 0.5, base]).T.astype(np.float32)
     X[150:330, 2] = np.nan                                              # third cell: most of the season missing
+    Xmin = (X * 0.3).astype(np.float32)
+    Xmin[200, 0] = -1.0                                                 # the year's lowest minimum: Jul 20
     H = np.full(X.shape, 15, dtype=np.int8)
+    Hmin = np.full(X.shape, 5, dtype=np.int8)
     thr = {90: 12.0, 95: 16.0, 99: 19.0}
-    m, valid = L.year_metrics(X, H, year, thr)
+    m, valid = L.year_metrics(X, H, year, thr, Xmin=Xmin, thr_min=5.0, Hmin=Hmin)
     assert valid.tolist() == [True, True, False]
+    # seasonal local extremes
     assert m["spring_peak_doy"][0] == pytest.approx(125, abs=1) and m["fall_peak_doy"][0] == pytest.approx(280, abs=1)
     assert 140 <= m["summer_trough_doy"][0] <= 243 and m["summer_trough"][0] < m["fall_peak"][0] < m["spring_peak"][0]
-    assert m["annual_max"][0] == pytest.approx(base[59:334].max(), rel=1e-5) and m["annual_max_doy"][0] == 125
+    assert m["spring_peak_of_min"][0] > m["summer_trough_of_min"][0]
+    # season and year (global) extremes
+    assert m["season_max"][0] == pytest.approx(base[59:334].max(), rel=1e-5) and m["season_max_doy"][0] == 125
+    assert m["year_max"][0] == pytest.approx(base.max(), rel=1e-5)
+    assert m["year_min"][0] == -1.0 and m["year_min_doy"][0] == 200 and m["season_min"][0] == -1.0
+    assert np.isnan(m["year_max"][2]) and np.isnan(m["season_max"][2])  # too little saved: no metrics
+    # months
+    assert m["m05_max"][0] == pytest.approx(base[120:151].max(), rel=1e-5)
+    assert m["m07_min"][0] == -1.0 and m["m01_min"][0] == pytest.approx(Xmin[0:31, 0].min(), rel=1e-5)
+    assert np.isfinite(m["m01_max"][2]) and np.isnan(m["m07_max"][2])   # cell 3: January saved, July not
+    # thresholds, timing, hour of day, recovery
     above = base[59:334] >= 12
     assert m["days_p90"][0] == above.sum() and m["days_p90"][1] == 0
     assert m["first_p90_doy"][0] == 59 + np.argmax(above) and m["span_p90"][0] > 150           # spring through fall
-    assert m["peak_hour_lst"][0] == 15 and np.isnan(m["peak_hour_lst"][1])
-    assert np.isnan(m["annual_max"][2])                                  # invalid cell: no metrics
-    Xmin = X * 0.3
-    m, _ = L.year_metrics(X, H, year, thr, Xmin=Xmin, thr_min=5.0)          # overnight recovery from daily minima
-    assert m["days_min_p90"][0] == (Xmin[59:334, 0] >= 5).sum() and m["min_season_mean"][0] == pytest.approx(Xmin[59:334, 0].mean(), rel=1e-5)
+    assert m["peak_hour_lst"][0] == 15 and np.isnan(m["peak_hour_lst"][1]) and m["trough_hour_lst"][1] == 5
+    assert m["days_min_p90"][0] == (Xmin[59:334, 0] >= 5).sum()
+    assert m["min_season_mean"][0] == pytest.approx(Xmin[59:334, 0].mean(), rel=1e-5)
+    assert m["diurnal_range_mean"][0] == pytest.approx((X[59:334, 0] - Xmin[59:334, 0]).mean(), rel=1e-5)
+    # a once-a-day index (classic daily FWI): its one value is both max and min; no hours, no range
+    m1, _ = L.year_metrics(X, None, year, thr)
+    assert m1["year_min"][0] == pytest.approx(X[:, 0].min()) and np.isnan(m1["diurnal_range_mean"][0])
+    assert np.isnan(m1["peak_hour_lst"][0]) and np.isnan(m1["days_min_p90"][0])
 
 
 def test_hist_percentiles_match_numpy():
@@ -197,6 +214,13 @@ def test_line_analysis_on_a_synthetic_record(grid, tmp_path, monkeypatch):
     assert fwi["thresholds"]["p90"] <= fwi["thresholds"]["p95"] <= fwi["thresholds"]["p99"]
     assert fwi["trends"]["days_p90"]["corridor"]["n_years"] == 3
     assert fwi["threshold_min_p90"] is not None and fwi["corridor"]["min_season_mean"] is not None
+    assert {"corridor_max", "corridor_min", "region_max", "region_min"} <= set(fwi["record"])
+    assert fwi["corridor"]["m05_max"] is not None and fwi["corridor"]["m05_min"] is not None
+    assert "corridor_min" in fwi["cycle"] and len(fwi["trends"]) == len(L.METRICS)
+    cyc = c.get(f"/api/lines/analyses/{aid}/cycle?index=FWI").get_json()["rows"]
+    assert cyc and all(r["corridor_min"] <= r["corridor"] for r in cyc if r["corridor"] is not None and r["corridor_min"] is not None)
+    rec = c.get(f"/api/lines/analyses/{aid}/cells?key=FWI.record_max").get_json()
+    assert sum(x is not None for x in rec["values"]) > 0
     assert "days_min_p90" in fwi["trends"] and "FWI_daily" not in s["indices"] or s["indices"].get("FWI_daily") is None
     assert s["corridor"]["cells"] > 0 and s["features"][0]["rank"] == 1
     ranked = [f for f in s["features"] if f.get("FWI.days_p95") is not None]
@@ -205,7 +229,7 @@ def test_line_analysis_on_a_synthetic_record(grid, tmp_path, monkeypatch):
     assert len(f["point_ids"]) == grid.n_cells and f["lo"] <= f["hi"]
     y = c.get(f"/api/lines/analyses/{aid}/yearly?index=FWI&metric=days_p90").get_json()
     assert [r["year"] for r in y["rows"]] == [2007, 2008, 2009]
-    for name in ("lines.csv", "cells.csv", "yearly_corridor_vs_region.csv", "seasonal_cycle.csv", "lines_with_metrics.geojson", "README.txt"):
+    for name in ("lines.csv", "cells_FWI.csv", "cells_ERC.csv", "yearly_corridor_vs_region.csv", "seasonal_cycle.csv", "lines_with_metrics.geojson", "README.txt"):
         rr = c.get(f"/api/lines/analyses/{aid}/file/{name}")
         assert rr.status_code == 200 and len(rr.data) > 50, name
     assert c.get(f"/api/lines/analyses/{aid}/file/..%2Fsettings.json").status_code in (400, 404)
@@ -292,3 +316,94 @@ def test_cross_check_fills_owner_and_voltage_from_a_parallel_layer(grid, tmp_pat
     assert p["h1"]["voltage_best_kv"] == 69 and "alt_voltage_disagrees" not in p["h1"]
     assert p["h2"]["alt_match_share"] == 0 and p["h2"]["owner_best"] == "AMERICAN TRANSMISSION CO"
     assert m["cross_check"]["owner_filled"] == 1
+
+
+# ----------------------------------------------------------------------------- review fixes (2026-10-21)
+
+def test_smoothing_needs_both_sides_and_local_extremes_stay_inside_their_window():
+    year = 2001
+    d = np.arange(365)
+    x = (2 + 20 * np.exp(-0.5 * ((d - 62) / 4) ** 2)).astype(np.float32)        # a sharp peak on Mar 4
+    full = np.vstack([x, x]).T
+    part = full.copy()
+    part[:59] = np.nan                                                          # Jan-Feb not saved
+    thr = {90: 50.0, 95: 60.0, 99: 70.0}
+    a, _ = L.year_metrics(full, None, year, thr)
+    b, _ = L.year_metrics(part, None, year, thr)
+    assert b["spring_peak_doy"][0] != 59                                       # not pinned to the window edge
+    assert b["spring_peak"][0] <= a["spring_peak"][0] * 1.1                     # nor inflated by a one-sided mean
+    mono = np.vstack([np.linspace(1, 30, 365)] * 2).T.astype(np.float32)       # rising all year: no summer trough
+    m, _ = L.year_metrics(mono, None, year, thr)
+    assert np.isnan(m["summer_trough"][0]) and np.isnan(m["spring_peak"][0])
+
+
+def test_dates_use_a_365_day_calendar_in_leap_years():
+    for year in (2003, 2004):
+        nd = 366 if year == 2004 else 365
+        d = np.arange(nd)
+        jul15 = (pd.Timestamp(year, 7, 15) - pd.Timestamp(year, 1, 1)).days
+        x = np.vstack([5 + 10 * np.exp(-0.5 * ((d - jul15) / 3) ** 2)] * 2).T.astype(np.float32)
+        m, _ = L.year_metrics(x, None, year, {90: 50.0, 95: 60.0, 99: 70.0})
+        assert m["season_max_doy"][0] == 195 and L._fmt_doy(m["season_max_doy"][0]) == "Jul 15"
+
+
+def test_mann_kendall_ties_and_serial_correlation():
+    from scipy import stats
+    rng = np.random.default_rng(5)
+    Y = rng.integers(0, 4, size=(30, 40)).astype(float)
+    Y[rng.random(Y.shape) < 0.1] = np.nan
+    tt = L._tie_term(Y)
+    for c in range(Y.shape[1]):
+        _, cnt = np.unique(Y[:, c][np.isfinite(Y[:, c])], return_counts=True)
+        assert tt[c] == pytest.approx(sum(t * (t - 1) * (2 * t + 5) for t in cnt))
+    y = np.round(rng.integers(0, 3, 40) + 0.03 * np.arange(40)).astype(float)
+    p = L.theil_sen(np.arange(40.0), y[:, None])[3][0]
+    assert p == pytest.approx(stats.kendalltau(np.arange(40), y).pvalue, rel=0.15)      # tie-corrected variance
+    counts = rng.poisson(np.linspace(0.05, 1.2, 48))                              # sparse rising counts
+    sl, S, n, p = L.theil_sen(np.arange(1979.0, 2027.0), counts[:, None].astype(float))
+    assert S[0] > 0 and p[0] < 0.05                                               # direction from S, not the slope
+    e = rng.normal(size=48)
+    assert L.mk_hamed_rao(np.arange(48), e) == pytest.approx(L.theil_sen(np.arange(48.0), e[:, None])[3][0], rel=0.3)
+    ar = np.zeros(48)
+    for i in range(1, 48):
+        ar[i] = 0.85 * ar[i - 1] + rng.normal()
+    assert L.mk_hamed_rao(np.arange(48), ar) >= L.theil_sen(np.arange(48.0), ar[:, None])[3][0]
+
+
+def test_cross_check_keeps_underground_and_raw_attributes(grid, tmp_path):
+    layers = L.LineLayers(Workspace(tmp_path / "ws"), grid)
+    a = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "geometry": {"type": "LineString", "coordinates": [[-88.60, 46.95], [-88.20, 46.85]]},
+         "properties": {"ID": "u1", "VOLTAGE": 69, "TYPE": "UNDERGROUND", "OWNER": "NOT AVAILABLE"}}]}
+    b = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "geometry": {"type": "LineString", "coordinates": [[-88.60, 46.9505], [-88.20, 46.8505]]},
+         "properties": {"@id": "way/1", "power": "cable", "location": "underground", "voltage": "69000"}}]}
+    la = layers.import_file("a.geojson", json.dumps(a).encode())["id"]
+    lb = layers.import_file("b.geojson", json.dumps(b).encode())["id"]
+    m = L.cross_attributes(layers, la, lb)
+    p = layers.get(m["id"])["features"][0]["properties"]
+    assert p["underground"] is True and "owner_best" not in p                    # OSM has no operator: nothing filled
+    assert p["attrs"].get("TYPE") == "UNDERGROUND"
+
+
+def test_daily_file_drops_part_days_and_completes_dec_31(grid, tmp_path):
+    import netCDF4
+    from aorc_tools.explorer.server import build
+    ws = tmp_path / "ws"
+    Workspace(ws).save_settings(domain_start="2008-12-14T00", domain_end="2009-01-06T23")
+    app = build(ws, source="synthetic", start_jobs=False)
+    E = app.extensions["wup"]
+    cfg = ChainConfig()
+    jid = E["jobs"].create("x", "synthetic", cfg, ["25_18"], "2008-12-20T00", "2009-01-06T23")
+    assert E["jobs"].run_now(jid)["status"] == "done"
+    path = E["store"].daily_year("synthetic", cfg.id, 2008)
+    rows = E["grid"].rows_for(E["grid"].cells_in_brick(25, 18))
+    with netCDF4.Dataset(path) as ds:
+        mx = ds["FWI_daily_max"][:].filled(np.nan)[:, E["store"].y[rows], E["store"].x[rows]]
+        noon = ds["FWI_noon"][:].filled(np.nan)[:, E["store"].y[rows], E["store"].x[rows]]
+        hmin = ds["FWI_hour_of_min"][:][:, E["store"].y[rows], E["store"].x[rows]]
+        assert int(ds.daily_format) == 4
+    dec19, dec20, dec31 = 353, 354, 365
+    assert np.isnan(mx[dec19]).all()                     # starts 00 UTC Dec 20 = evening of Dec 19 locally: a part-day
+    assert np.isfinite(mx[dec20]).all() and np.isfinite(mx[dec31]).all()   # Dec 31 completed from 2009's first chunk
+    assert np.isfinite(noon[dec31]).all() and (np.asarray(hmin[dec31]) >= 0).all()
